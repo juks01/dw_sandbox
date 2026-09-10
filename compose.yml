@@ -1,0 +1,124 @@
+services:
+
+  extractor:
+    build: ./extractor
+    restart: "no"
+    volumes:
+      - ./data/landing:/landing:Z
+    networks: [dw]
+
+  loader:
+    build: ./loader
+    restart: "no"
+    volumes:
+      - ./data/landing:/landing:Z
+    environment:
+      PGHOST: staging
+      PGDATABASE: staging
+      PGUSER: loader
+      PGPASSWORD: ${LOADER_PASSWORD:-loader}
+    depends_on:
+      staging:
+        condition: service_healthy
+      extractor:
+        condition: service_completed_successfully
+    networks: [dw]
+
+  staging:
+    build: ./postgres
+    environment:
+      POSTGRES_DB: staging
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      TZ: ${TZ:-Europe/Helsinki}
+    ports:
+      - "5433:5432"
+    volumes:
+      - staging_data:/var/lib/postgresql/data
+      - ./postgres/staging/init.sql:/docker-entrypoint-initdb.d/init.sql:Z
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d staging"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+    networks: [dw]
+
+  core:
+    build: ./postgres
+    environment:
+      POSTGRES_DB: core
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      TZ: ${TZ:-Europe/Helsinki}
+    ports:
+      - "5434:5432"
+    volumes:
+      - core_data:/var/lib/postgresql/data
+      - ./postgres/core/init.sql:/docker-entrypoint-initdb.d/init.sql:Z
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d core"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+    networks: [dw]
+
+  mart:
+    build: ./postgres
+    environment:
+      POSTGRES_DB: mart
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      TZ: ${TZ:-Europe/Helsinki}
+    ports:
+      - "5435:5432"
+    volumes:
+      - mart_data:/var/lib/postgresql/data
+      - ./postgres/mart/init.sql:/docker-entrypoint-initdb.d/init.sql:Z
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d mart"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+    networks: [dw]
+
+  users:
+    build: ./postgres
+    environment:
+      POSTGRES_DB: users
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      TZ: ${TZ:-Europe/Helsinki}
+    ports:
+      - "5436:5432"
+    volumes:
+      - users_data:/var/lib/postgresql/data
+      - ./postgres/users/init.sql:/docker-entrypoint-initdb.d/init.sql:Z
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d users"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+    networks: [dw]
+
+  orchestrator:
+    build: ./orchestrator
+    restart: "no"
+    environment:
+      STAGING_DSN: postgresql://admin:${ADMIN_PASSWORD:-admin}@staging:5432/staging
+      CORE_DSN: postgresql://admin:${ADMIN_PASSWORD:-admin}@core:5432/core
+      MART_DSN: postgresql://admin:${ADMIN_PASSWORD:-admin}@mart:5432/mart
+    depends_on:
+      staging:
+        condition: service_healthy
+      core:
+        condition: service_healthy
+      mart:
+        condition: service_healthy
+      loader:
+        condition: service_completed_successfully
+    networks: [dw]
+
+networks:
+  dw:
+
+volumes:
+  staging_data:
+  core_data:
+  mart_data:
+  users_data:

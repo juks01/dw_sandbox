@@ -1,0 +1,27 @@
+CREATE ROLE admin LOGIN PASSWORD 'admin';
+
+GRANT pg_read_all_data TO admin;
+ALTER ROLE admin BYPASSRLS;
+
+CREATE SCHEMA mart AUTHORIZATION admin;
+
+CREATE TABLE mart.product (
+    product_id integer PRIMARY KEY
+);
+
+ALTER TABLE mart.product ENABLE ROW LEVEL SECURITY;
+
+CREATE ROLE reporting LOGIN PASSWORD 'reporting';
+
+GRANT USAGE ON SCHEMA mart TO reporting;
+GRANT SELECT ON mart.product TO reporting;
+
+CREATE POLICY product_read
+ON mart.product
+FOR SELECT
+TO reporting
+USING (true);
+
+GRANT SELECT, INSERT, UPDATE, DELETE
+ON ALL TABLES IN SCHEMA mart
+TO admin;
