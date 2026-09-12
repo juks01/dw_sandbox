@@ -4,8 +4,6 @@ CREATE ROLE reporting LOGIN PASSWORD 'reporting';
 GRANT pg_read_all_data TO admin;
 ALTER ROLE admin BYPASSRLS;
 
--- admin does not own the "mart" database, so without this it cannot
--- CREATE SCHEMA core_ext at runtime inside mart.refresh() below.
 GRANT CREATE ON DATABASE mart TO admin;
 
 CREATE SCHEMA mart AUTHORIZATION admin;
@@ -24,6 +22,7 @@ CREATE SERVER core_srv
         port '5432'
     );
 
+-- TODO: Don't connect to other DB as admin! Use some service account instead.
 CREATE USER MAPPING FOR admin
     SERVER core_srv
     OPTIONS (

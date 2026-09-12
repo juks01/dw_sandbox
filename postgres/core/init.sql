@@ -3,9 +3,6 @@ CREATE ROLE admin LOGIN PASSWORD 'admin';
 GRANT pg_read_all_data TO admin;
 ALTER ROLE admin BYPASSRLS;
 
--- admin does not own the "core" database, so without this it cannot
--- CREATE SCHEMA staging_ext / users_ext at runtime inside the sync
--- procedures below.
 GRANT CREATE ON DATABASE core TO admin;
 
 CREATE SCHEMA core AUTHORIZATION admin;
