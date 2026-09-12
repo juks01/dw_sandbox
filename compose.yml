@@ -53,6 +53,11 @@ services:
     volumes:
       - core_data:/var/lib/postgresql/data
       - ./postgres/core/init.sql:/docker-entrypoint-initdb.d/init.sql:Z
+    depends_on:
+      staging:
+        condition: service_healthy
+      users:
+        condition: service_healthy
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres -d core"]
       interval: 2s
@@ -71,6 +76,9 @@ services:
     volumes:
       - mart_data:/var/lib/postgresql/data
       - ./postgres/mart/init.sql:/docker-entrypoint-initdb.d/init.sql:Z
+    depends_on:
+      core:
+        condition: service_healthy
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres -d mart"]
       interval: 2s
@@ -100,12 +108,9 @@ services:
     build: ./orchestrator
     restart: "no"
     environment:
-      STAGING_DSN: postgresql://admin:${ADMIN_PASSWORD:-admin}@staging:5432/staging
       CORE_DSN: postgresql://admin:${ADMIN_PASSWORD:-admin}@core:5432/core
       MART_DSN: postgresql://admin:${ADMIN_PASSWORD:-admin}@mart:5432/mart
     depends_on:
-      staging:
-        condition: service_healthy
       core:
         condition: service_healthy
       mart:

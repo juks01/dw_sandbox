@@ -1,11 +1,10 @@
 CREATE ROLE admin LOGIN PASSWORD 'admin';
+CREATE ROLE core_reader LOGIN PASSWORD 'core_reader';
 
 GRANT pg_read_all_data TO admin;
 ALTER ROLE admin BYPASSRLS;
 
-CREATE SCHEMA users;
-
-GRANT ALL ON SCHEMA users TO admin;
+CREATE SCHEMA users AUTHORIZATION admin;
 
 CREATE TABLE users.department (
     department_id serial PRIMARY KEY,
@@ -21,11 +20,35 @@ CREATE TABLE users.end_user (
     is_active boolean NOT NULL DEFAULT true
 );
 
+GRANT ALL
+    ON SCHEMA users
+    TO admin;
+
 GRANT SELECT, INSERT, UPDATE, DELETE
-ON ALL TABLES IN SCHEMA users TO admin;
+    ON ALL TABLES IN SCHEMA users
+    TO admin;
 
 GRANT USAGE, SELECT
-ON ALL SEQUENCES IN SCHEMA users TO admin;
+    ON ALL SEQUENCES IN SCHEMA users
+    TO admin;
+
+GRANT USAGE
+    ON SCHEMA users
+    TO core_reader;
+
+GRANT SELECT
+    ON ALL TABLES IN SCHEMA users
+    TO core_reader;
+
+GRANT SELECT
+    ON ALL SEQUENCES IN SCHEMA users
+    TO core_reader;
+
+ALTER DEFAULT PRIVILEGES FOR ROLE admin IN SCHEMA users
+    GRANT SELECT ON TABLES TO core_reader;
+
+ALTER DEFAULT PRIVILEGES FOR ROLE admin IN SCHEMA users
+    GRANT SELECT ON SEQUENCES TO core_reader;
 
 INSERT INTO users.department (code, name)
 VALUES
