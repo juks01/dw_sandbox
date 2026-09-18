@@ -69,8 +69,8 @@ def api_delete_source(source_id: int, _: str = Depends(require_auth)) -> dict:
 
 @app.put("/api/sources/{source_id}")
 def api_update_source(source_id: int, body: SourceCreate, _: str = Depends(require_auth)) -> dict:
-    if not db.update_source_active(source_id, body.enabled):
-        raise HTTPException(status_code=404, detail="source not found")
+    if not db.update_source(source_id, body.name, body.url, body.cron, body.enabled):
+        raise HTTPException(status_code=404, detail="update failed")
     return {"status": "updated", "id": source_id}
 
 

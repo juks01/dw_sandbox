@@ -46,6 +46,25 @@
   .row-form input { background: #0b1222; border: 1px solid var(--border); color: var(--text);
     border-radius: 6px; padding: 6px 8px; font-size: 12px; }
   .refresh-note { color: var(--muted); font-size: 11px; margin-top: 8px; }
+  .modal-overlay {
+    display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.55);
+    align-items: center; justify-content: center; z-index: 50;
+  }
+  .modal-overlay.open { display: flex; }
+  .modal {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+    padding: 20px; width: 360px; max-width: 90vw;
+  }
+  .modal h3 { margin: 0 0 14px 0; font-size: 15px; }
+  .modal label { display: block; font-size: 12px; color: var(--muted); margin: 10px 0 4px 0; }
+  .modal input[type="text"] {
+    width: 100%; background: #0b1222; border: 1px solid var(--border); color: var(--text);
+    border-radius: 6px; padding: 7px 8px; font-size: 13px;
+  }
+  .modal .checkbox-row { display: flex; align-items: center; gap: 8px; margin-top: 14px; }
+  .modal .checkbox-row label { margin: 0; color: var(--text); font-size: 13px; }
+  .modal .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px; }
+  button.secondary { background: var(--border); }
 </style>
 </head>
 <body>
@@ -85,6 +104,27 @@
     <p class="refresh-note">Auto-refreshes every 3s.</p>
   </div>
 
+  <div id="edit-overlay" class="modal-overlay">
+    <div class="modal">
+      <h3>Edit source</h3>
+      <input type="hidden" id="edit-id">
+      <label for="edit-name">Name</label>
+      <input type="text" id="edit-name">
+      <label for="edit-url">URL</label>
+      <input type="text" id="edit-url">
+      <label for="edit-cron">Cron</label>
+      <input type="text" id="edit-cron">
+      <div class="checkbox-row">
+        <input type="checkbox" id="edit-enabled">
+        <label for="edit-enabled">Active</label>
+      </div>
+      <div class="modal-actions">
+        <button class="secondary" onclick="closeEditModal()">Cancel</button>
+        <button onclick="saveEditedSource()">Save</button>
+      </div>
+    </div>
+  </div>
+
 <script>
 async function apiGet(path) {
   const r = await fetch(path);
@@ -96,6 +136,18 @@ async function apiPost(path, body) {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: body ? JSON.stringify(body) : undefined,
+  });
+  if (!r.ok) {
+    const detail = await r.text();
+    throw new Error(`${r.status}: ${detail}`);
+  }
+  return r.json();
+}
+async function apiPut(path, body) {
+  const r = await fetch(path, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
   });
   if (!r.ok) {
     const detail = await r.text();
@@ -139,6 +191,39 @@ async function deleteSource(id) {
   refreshSources();
 }
 
+let editSources = [];
+
+function openEditModal(id) {
+  const s = editSources.find(x => x.id === id);
+  if (!s) return;
+  document.getElementById('edit-id').value = s.id;
+  document.getElementById('edit-name').value = s.name;
+  document.getElementById('edit-url').value = s.url;
+  document.getElementById('edit-cron').value = s.cron;
+  document.getElementById('edit-enabled').checked = !!s.enabled;
+  document.getElementById('edit-overlay').classList.add('open');
+}
+
+function closeEditModal() {
+  document.getElementById('edit-overlay').classList.remove('open');
+}
+
+async function saveEditedSource() {
+  const id = document.getElementById('edit-id').value;
+  const name = document.getElementById('edit-name').value.trim();
+  const url = document.getElementById('edit-url').value.trim();
+  const cron = document.getElementById('edit-cron').value.trim();
+  const enabled = document.getElementById('edit-enabled').checked;
+  if (!name || !url || !cron) { alert('name, url and cron are all required'); return; }
+  try {
+    await apiPut(`/api/sources/${id}`, { name, url, cron, enabled });
+    closeEditModal();
+    refreshSources();
+  } catch (e) {
+    alert(e.message);
+  }
+}
+
 async function createSource() {
   const name = document.getElementById('new-name').value.trim();
   const url = document.getElementById('new-url').value.trim();
@@ -159,6 +244,7 @@ async function refreshSources() {
   const body = document.getElementById('sources-body');
   try {
     const sources = await apiGet('/api/sources');
+    editSources = sources;
     body.innerHTML = sources.map(s => `
       <tr>
         <td>${s.name}</td>
@@ -168,6 +254,7 @@ async function refreshSources() {
         <td>${s.enabled ? 'yes' : 'no'}</td>
         <td>
           <button onclick="runSource(${s.id})">Run</button>
+          <button class="secondary" onclick="openEditModal(${s.id})">Edit</button>
           <button class="danger" onclick="deleteSource(${s.id})">Delete</button>
         </td>
       </tr>`).join('') || '<tr><td colspan="6">No sources yet</td></tr>';

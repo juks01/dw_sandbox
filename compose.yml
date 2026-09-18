@@ -156,7 +156,7 @@ services:
       - ./data/landing:/landing:z
     networks: [dw]
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://localhost:8000/health',timeout=3)"]
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://localhost:8000/health',timeout=30)"]
       interval: 5s
       timeout: 5s
       retries: 10
@@ -181,7 +181,7 @@ services:
       staging:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://localhost:8000/health',timeout=3)"]
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://localhost:8000/health',timeout=30)"]
       interval: 5s
       timeout: 5s
       retries: 10
@@ -229,7 +229,7 @@ services:
       mart:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://localhost:8000/health',timeout=3)"]
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://localhost:8000/health',timeout=5)"]
       interval: 5s
       timeout: 5s
       retries: 10

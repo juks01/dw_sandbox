@@ -93,7 +93,7 @@ def create_source(name: str, url: str, cron: str, enabled: bool = True) -> dict:
     with get_db() as conn:
         cur = conn.execute(
             "INSERT INTO sources (name, url, cron, enabled, next_run) VALUES (?, ?, ?, ?, NULL)",
-            (name, url, cron, 1 if enabled else 0),
+            (name, url, cron, 1 if enabled else 0)
         )
         new_id = cur.lastrowid
         row = conn.execute("SELECT * FROM sources WHERE id = ?", (new_id,)).fetchone()
@@ -102,11 +102,19 @@ def create_source(name: str, url: str, cron: str, enabled: bool = True) -> dict:
 
 def update_source_next_run(source_id: int, next_run_iso: Optional[str]) -> None:
     with get_db() as conn:
-        conn.execute("UPDATE sources SET next_run = ? WHERE id = ?", (next_run_iso, source_id))
+        conn.execute(
+            "UPDATE sources SET next_run = ? WHERE id = ?",
+            (next_run_iso, source_id)
+        )
 
-def update_source_active(source_id: int, enabled: bool) -> None:
+
+def update_source(source_id: int, name: str, url: str, cron: str, enabled: bool = True) -> bool:
     with get_db() as conn:
-        conn.execute("UPDATE sources SET enabled = ? WHERE id = ?", (1 if enabled else 0, source_id))
+        cur = conn.execute(
+            "UPDATE sources SET (name, url, cron, enabled) = (?, ?, ?, ?) WHERE id = ?",
+            (name, url, cron, 1 if enabled else 0, source_id)
+        )
+        return cur.rowcount > 0
 
 
 def delete_source(source_id: int) -> bool:
