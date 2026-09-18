@@ -1,129 +1,235 @@
+networks:
+  dw:
+    driver: bridge
+
+volumes:
+  staging_data:
+  users_data:
+  core_data:
+  mart_data:
+
 services:
 
-  extractor:
-    build: ./extractor
-    restart: "no"
-    volumes:
-      - ./data/landing:/landing:Z
-    networks: [dw]
-
-  loader:
-    build: ./loader
-    restart: "no"
-    volumes:
-      - ./data/landing:/landing:Z
-    environment:
-      PGHOST: staging
-      PGDATABASE: staging
-      PGUSER: loader
-      PGPASSWORD: ${LOADER_PASSWORD:-loader}
-    depends_on:
-      staging:
-        condition: service_healthy
-      extractor:
-        condition: service_completed_successfully
-    networks: [dw]
-
+  # ---------------------------------------------------------------------
+  # PostgreSQL databases
+  # ---------------------------------------------------------------------
   staging:
-    build: ./postgres
+    image: docker.io/library/postgres:16-bookworm
+    container_name: dw-staging
+    hostname: staging
     environment:
-      POSTGRES_DB: staging
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
-      TZ: ${TZ:-Europe/Helsinki}
-    ports:
-      - "5433:5432"
+      TZ: ${TZ}
+      POSTGRES_DB: ${STAGING_DB}
+      POSTGRES_USER: ${ADMIN_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      PG_LOCALE: ${PG_LOCALE}
+      ADMIN_USER: ${ADMIN_USER}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD}
+      LOADER_WRITER_USER: ${LOADER_WRITER_USER}
+      LOADER_WRITER_PASSWORD: ${LOADER_WRITER_PASSWORD}
+      STAGING_READER_USER: ${STAGING_READER_USER}
+      STAGING_READER_PASSWORD: ${STAGING_READER_PASSWORD}
     volumes:
       - staging_data:/var/lib/postgresql/data
-      - ./postgres/staging/init.sql:/docker-entrypoint-initdb.d/init.sql:Z
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d staging"]
-      interval: 2s
-      timeout: 3s
-      retries: 20
+      - ./postgres/staging:/docker-entrypoint-initdb.d:z
+    ports:
+      - "${STAGING_PORT}:5432"
     networks: [dw]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${ADMIN_USER} -d ${STAGING_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  users:
+    image: docker.io/library/postgres:16-bookworm
+    container_name: dw-users
+    hostname: users
+    environment:
+      TZ: ${TZ}
+      POSTGRES_DB: ${USERS_DB}
+      POSTGRES_USER: ${ADMIN_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      PG_LOCALE: ${PG_LOCALE}
+      ADMIN_USER: ${ADMIN_USER}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD}
+      USERS_READER_USER: ${USERS_READER_USER}
+      USERS_READER_PASSWORD: ${USERS_READER_PASSWORD}
+    volumes:
+      - users_data:/var/lib/postgresql/data
+      - ./postgres/users:/docker-entrypoint-initdb.d:z
+    ports:
+      - "${USERS_PORT}:5432"
+    networks: [dw]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${ADMIN_USER} -d ${USERS_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
 
   core:
-    build: ./postgres
+    image: docker.io/library/postgres:16-bookworm
+    container_name: dw-core
+    hostname: core
     environment:
-      POSTGRES_DB: core
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
-      TZ: ${TZ:-Europe/Helsinki}
-    ports:
-      - "5434:5432"
+      TZ: ${TZ}
+      POSTGRES_DB: ${CORE_DB}
+      POSTGRES_USER: ${ADMIN_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      PG_LOCALE: ${PG_LOCALE}
+      ADMIN_USER: ${ADMIN_USER}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD}
+      CORE_READER_USER: ${CORE_READER_USER}
+      CORE_READER_PASSWORD: ${CORE_READER_PASSWORD}
+      CORE_SERVICE_USER: ${CORE_SERVICE_USER}
+      CORE_SERVICE_PASSWORD: ${CORE_SERVICE_PASSWORD}
+      STAGING_READER_USER: ${STAGING_READER_USER}
+      STAGING_READER_PASSWORD: ${STAGING_READER_PASSWORD}
+      USERS_READER_USER: ${USERS_READER_USER}
+      USERS_READER_PASSWORD: ${USERS_READER_PASSWORD}
+      STAGING_DB: ${STAGING_DB}
+      USERS_DB: ${USERS_DB}
     volumes:
       - core_data:/var/lib/postgresql/data
-      - ./postgres/core/init.sql:/docker-entrypoint-initdb.d/init.sql:Z
+      - ./postgres/core:/docker-entrypoint-initdb.d:z
+    ports:
+      - "${CORE_PORT}:5432"
+    networks: [dw]
     depends_on:
       staging:
         condition: service_healthy
       users:
         condition: service_healthy
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d core"]
-      interval: 2s
-      timeout: 3s
-      retries: 20
-    networks: [dw]
+      test: ["CMD-SHELL", "pg_isready -U ${ADMIN_USER} -d ${CORE_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
 
   mart:
-    build: ./postgres
+    image: docker.io/library/postgres:16-bookworm
+    container_name: dw-mart
+    hostname: mart
     environment:
-      POSTGRES_DB: mart
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
-      TZ: ${TZ:-Europe/Helsinki}
-    ports:
-      - "5435:5432"
+      TZ: ${TZ}
+      POSTGRES_DB: ${MART_DB}
+      POSTGRES_USER: ${ADMIN_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      PG_LOCALE: ${PG_LOCALE}
+      ADMIN_USER: ${ADMIN_USER}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD}
+      MART_SERVICE_USER: ${MART_SERVICE_USER}
+      MART_SERVICE_PASSWORD: ${MART_SERVICE_PASSWORD}
+      REPORTING_USER: ${REPORTING_USER}
+      REPORTING_PASSWORD: ${REPORTING_PASSWORD}
+      CORE_READER_USER: ${CORE_READER_USER}
+      CORE_READER_PASSWORD: ${CORE_READER_PASSWORD}
+      CORE_DB: ${CORE_DB}
     volumes:
       - mart_data:/var/lib/postgresql/data
-      - ./postgres/mart/init.sql:/docker-entrypoint-initdb.d/init.sql:Z
+      - ./postgres/mart:/docker-entrypoint-initdb.d:z
+    ports:
+      - "${MART_PORT}:5432"
+    networks: [dw]
     depends_on:
       core:
         condition: service_healthy
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d mart"]
-      interval: 2s
-      timeout: 3s
-      retries: 20
-    networks: [dw]
+      test: ["CMD-SHELL", "pg_isready -U ${ADMIN_USER} -d ${MART_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
 
-  users:
-    build: ./postgres
+  # ---------------------------------------------------------------------
+  # Application services
+  # ---------------------------------------------------------------------
+  extractor:
+    build:
+      context: ./extractor
+    container_name: dw-extractor
+    hostname: extractor
     environment:
-      POSTGRES_DB: users
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
-      TZ: ${TZ:-Europe/Helsinki}
-    ports:
-      - "5436:5432"
+      TZ: ${TZ}
+      EXTRACTOR_USER_AGENT: ${EXTRACTOR_USER_AGENT}
+      LANDING_DIR: /landing
     volumes:
-      - users_data:/var/lib/postgresql/data
-      - ./postgres/users/init.sql:/docker-entrypoint-initdb.d/init.sql:Z
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d users"]
-      interval: 2s
-      timeout: 3s
-      retries: 20
+      - ./data/landing:/landing:z
     networks: [dw]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://localhost:8000/health',timeout=3)"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  loader:
+    build:
+      context: ./loader
+    container_name: dw-loader
+    hostname: loader
+    environment:
+      TZ: ${TZ}
+      LANDING_DIR: /landing
+      STAGING_HOST: staging
+      STAGING_PORT: 5432
+      STAGING_DB: ${STAGING_DB}
+      LOADER_WRITER_USER: ${LOADER_WRITER_USER}
+      LOADER_WRITER_PASSWORD: ${LOADER_WRITER_PASSWORD}
+    volumes:
+      - ./data/landing:/landing:z
+    networks: [dw]
+    depends_on:
+      staging:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://localhost:8000/health',timeout=3)"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
 
   orchestrator:
-    build: ./orchestrator
-    restart: "no"
+    build:
+      context: ./orchestrator
+    container_name: dw-orchestrator
+    hostname: orchestrator
     environment:
-      CORE_DSN: postgresql://admin:${ADMIN_PASSWORD:-admin}@core:5432/core
-      MART_DSN: postgresql://admin:${ADMIN_PASSWORD:-admin}@mart:5432/mart
+      TZ: ${TZ}
+      ORCH_USER: ${ORCH_USER}
+      ORCH_PASSWORD: ${ORCH_PASSWORD}
+      ORCH_SQLITE_PATH: ${ORCH_SQLITE_PATH}
+      ORCH_SCHEDULER_INTERVAL_SECONDS: ${ORCH_SCHEDULER_INTERVAL_SECONDS}
+      EXTRACTOR_URL: ${EXTRACTOR_URL}
+      LOADER_URL: ${LOADER_URL}
+      STAGING_HOST: ${STAGING_HOST}
+      STAGING_PORT: ${STAGING_PORT}
+      STAGING_DB: ${STAGING_DB}
+      STAGING_READER_USER: ${STAGING_READER_USER}
+      STAGING_READER_PASSWORD: ${STAGING_READER_PASSWORD}
+      CORE_HOST: ${CORE_HOST}
+      CORE_PORT: ${CORE_PORT}
+      CORE_DB: ${CORE_DB}
+      CORE_SERVICE_USER: ${CORE_SERVICE_USER}
+      CORE_SERVICE_PASSWORD: ${CORE_SERVICE_PASSWORD}
+      MART_HOST: ${MART_HOST}
+      MART_PORT: ${MART_PORT}
+      MART_DB: ${MART_DB}
+      MART_SERVICE_USER: ${MART_SERVICE_USER}
+      MART_SERVICE_PASSWORD: ${MART_SERVICE_PASSWORD}
+    volumes:
+      - ./orchestrator/data:/data:z
+    ports:
+      - "${ORCHESTRATOR_PORT}:8000"
+    networks: [dw]
     depends_on:
+      extractor:
+        condition: service_healthy
+      loader:
+        condition: service_healthy
       core:
         condition: service_healthy
       mart:
         condition: service_healthy
-      loader:
-        condition: service_completed_successfully
-    networks: [dw]
-
-networks:
-  dw:
-
-volumes:
-  staging_data:
-  core_data:
-  mart_data:
-  users_data:
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://localhost:8000/health',timeout=3)"]
+      interval: 5s
+      timeout: 5s
+      retries: 10

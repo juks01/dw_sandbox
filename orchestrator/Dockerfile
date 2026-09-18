@@ -1,7 +1,14 @@
-FROM python:3.14-slim
+FROM docker.io/library/python:3.12-slim
 
-RUN pip install --no-cache-dir psycopg[binary]
+WORKDIR /app
 
-COPY run.py /run.py
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
 
-CMD ["python", "/run.py"]
+COPY app ./app
+
+ENV PYTHONUNBUFFERED=1
+EXPOSE 8000
+VOLUME ["/data"]
+
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

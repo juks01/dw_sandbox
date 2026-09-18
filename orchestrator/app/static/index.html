@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+<html lang="fi">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>dw-dev orchestrator</title>
+<style>
+  :root {
+    --bg: #0f172a; --panel: #1e293b; --border: #334155; --text: #e2e8f0;
+    --muted: #94a3b8; --green: #22c55e; --red: #ef4444; --amber: #f59e0b; --blue: #3b82f6;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; font-family: -apple-system, Segoe UI, Roboto, sans-serif;
+    background: var(--bg); color: var(--text); padding: 24px;
+  }
+  h1 { font-size: 20px; margin: 0 0 4px 0; }
+  .subtitle { color: var(--muted); margin: 0 0 24px 0; font-size: 13px; }
+  .panel {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+    padding: 16px; margin-bottom: 20px;
+  }
+  .panel h2 { font-size: 15px; margin: 0 0 12px 0; }
+  .health-row { display: flex; gap: 10px; flex-wrap: wrap; }
+  .badge {
+    display: inline-flex; align-items: center; gap: 6px; padding: 6px 10px;
+    border-radius: 999px; font-size: 12px; border: 1px solid var(--border);
+  }
+  .dot { width: 8px; height: 8px; border-radius: 50%; }
+  .ok { background: var(--green); } .bad { background: var(--red); }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); }
+  th { color: var(--muted); font-weight: 500; }
+  .status-pill { padding: 3px 8px; border-radius: 6px; font-size: 12px; font-weight: 600; }
+  .st-done { background: rgba(34,197,94,0.15); color: var(--green); }
+  .st-failed { background: rgba(239,68,68,0.15); color: var(--red); }
+  .st-running, .st-queued { background: rgba(245,158,11,0.15); color: var(--amber); }
+  button {
+    background: var(--blue); color: white; border: none; padding: 6px 12px;
+    border-radius: 6px; font-size: 12px; cursor: pointer; margin-right: 6px;
+  }
+  button.danger { background: var(--red); }
+  button:hover { opacity: 0.85; }
+  .error-text { color: var(--red); font-size: 12px; max-width: 320px; overflow-wrap: break-word; }
+  .row-form { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
+  .row-form input { background: #0b1222; border: 1px solid var(--border); color: var(--text);
+    border-radius: 6px; padding: 6px 8px; font-size: 12px; }
+  .refresh-note { color: var(--muted); font-size: 11px; margin-top: 8px; }
+</style>
+</head>
+<body>
+  <h1>dw-dev orchestrator</h1>
+  <p class="subtitle">SOURCE → EXTRACTOR → LANDING → LOADER → STAGING → CORE → MART → REPORTING</p>
+
+  <div class="panel">
+    <h2>System health</h2>
+    <div id="health" class="health-row">Loading…</div>
+  </div>
+
+  <div class="panel">
+    <h2>Sources</h2>
+    <table>
+      <thead>
+        <tr><th>Name</th><th>URL</th><th>Cron</th><th>Next run (UTC)</th><th>Enabled</th><th></th></tr>
+      </thead>
+      <tbody id="sources-body"><tr><td colspan="6">Loading…</td></tr></tbody>
+    </table>
+
+    <div class="row-form">
+      <input id="new-name" placeholder="name">
+      <input id="new-url" placeholder="url (or local://demo)" style="width:220px">
+      <input id="new-cron" placeholder="cron, e.g. */15 * * * *" style="width:160px">
+      <button onclick="createSource()">Add source</button>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h2>Recent pipeline runs</h2>
+    <table>
+      <thead>
+        <tr><th>ID</th><th>Source</th><th>Status</th><th>Step</th><th>Started</th><th>Finished</th><th>Error</th></tr>
+      </thead>
+      <tbody id="runs-body"><tr><td colspan="7">Loading…</td></tr></tbody>
+    </table>
+    <p class="refresh-note">Auto-refreshes every 3s.</p>
+  </div>
+
+<script>
+async function apiGet(path) {
+  const r = await fetch(path);
+  if (!r.ok) throw new Error(await r.text());
+  return r.json();
+}
+async function apiPost(path, body) {
+  const r = await fetch(path, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  if (!r.ok) {
+    const detail = await r.text();
+    throw new Error(`${r.status}: ${detail}`);
+  }
+  return r.json();
+}
+async function apiDelete(path) {
+  const r = await fetch(path, { method: 'DELETE' });
+  if (!r.ok) throw new Error(await r.text());
+  return r.json();
+}
+
+function badge(label, ok) {
+  return `<span class="badge"><span class="dot ${ok ? 'ok' : 'bad'}"></span>${label}</span>`;
+}
+
+async function refreshHealth() {
+  const el = document.getElementById('health');
+  try {
+    const h = await apiGet('/api/health');
+    el.innerHTML = Object.entries(h.dependencies)
+      .map(([name, ok]) => badge(name, ok)).join('');
+  } catch (e) {
+    el.innerHTML = '<span class="error-text">health check failed</span>';
+  }
+}
+
+async function runSource(id) {
+  try {
+    await apiPost(`/api/sources/${id}/run`);
+    refreshRuns();
+  } catch (e) {
+    alert(e.message);
+  }
+}
+
+async function deleteSource(id) {
+  if (!confirm('Delete this source?')) return;
+  await apiDelete(`/api/sources/${id}`);
+  refreshSources();
+}
+
+async function createSource() {
+  const name = document.getElementById('new-name').value.trim();
+  const url = document.getElementById('new-url').value.trim();
+  const cron = document.getElementById('new-cron').value.trim();
+  if (!name || !url || !cron) { alert('name, url and cron are all required'); return; }
+  try {
+    await apiPost('/api/sources', { name, url, cron, enabled: true });
+    document.getElementById('new-name').value = '';
+    document.getElementById('new-url').value = '';
+    document.getElementById('new-cron').value = '';
+    refreshSources();
+  } catch (e) {
+    alert(e.message);
+  }
+}
+
+async function refreshSources() {
+  const body = document.getElementById('sources-body');
+  try {
+    const sources = await apiGet('/api/sources');
+    body.innerHTML = sources.map(s => `
+      <tr>
+        <td>${s.name}</td>
+        <td>${s.url}</td>
+        <td>${s.cron}</td>
+        <td>${s.next_run ?? '-'}</td>
+        <td>${s.enabled ? 'yes' : 'no'}</td>
+        <td>
+          <button onclick="runSource(${s.id})">Run</button>
+          <button class="danger" onclick="deleteSource(${s.id})">Delete</button>
+        </td>
+      </tr>`).join('') || '<tr><td colspan="6">No sources yet</td></tr>';
+  } catch (e) {
+    body.innerHTML = `<tr><td colspan="6" class="error-text">${e.message}</td></tr>`;
+  }
+}
+
+function statusClass(status) {
+  return { done: 'st-done', failed: 'st-failed', running: 'st-running', queued: 'st-queued' }[status] || '';
+}
+
+async function refreshRuns() {
+  const body = document.getElementById('runs-body');
+  try {
+    const runs = await apiGet('/api/runs?limit=30');
+    body.innerHTML = runs.map(r => `
+      <tr>
+        <td>${r.id}</td>
+        <td>${r.source}</td>
+        <td><span class="status-pill ${statusClass(r.status)}">${r.status}</span></td>
+        <td>${r.step ?? '-'}</td>
+        <td>${r.started ?? '-'}</td>
+        <td>${r.finished ?? '-'}</td>
+        <td class="error-text">${r.error ?? ''}</td>
+      </tr>`).join('') || '<tr><td colspan="7">No runs yet</td></tr>';
+  } catch (e) {
+    body.innerHTML = `<tr><td colspan="7" class="error-text">${e.message}</td></tr>`;
+  }
+}
+
+function refreshAll() {
+  refreshHealth();
+  refreshSources();
+  refreshRuns();
+}
+
+refreshAll();
+setInterval(refreshAll, 3000);
+</script>
+</body>
+</html>

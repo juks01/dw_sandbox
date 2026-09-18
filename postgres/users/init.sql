@@ -1,80 +1,51 @@
-CREATE ROLE admin LOGIN PASSWORD 'admin';
-CREATE ROLE core_reader LOGIN PASSWORD 'core_reader';
+-- Users / organization master data. Demo database used to prove RLS works
+-- end-to-end (users -> core -> mart).
 
-GRANT pg_read_all_data TO admin;
-ALTER ROLE admin BYPASSRLS;
+CREATE SCHEMA IF NOT EXISTS users AUTHORIZATION CURRENT_USER;
 
-CREATE SCHEMA users AUTHORIZATION admin;
-
-CREATE TABLE users.department (
-    department_id serial PRIMARY KEY,
-    code text NOT NULL UNIQUE,
-    name text NOT NULL
+CREATE TABLE IF NOT EXISTS users.department (
+    department_id   SERIAL PRIMARY KEY,
+    code            TEXT NOT NULL UNIQUE,
+    name            TEXT NOT NULL
 );
 
-CREATE TABLE users.end_user (
-    user_id serial PRIMARY KEY,
-    username text NOT NULL UNIQUE,
-    full_name text,
-    department_id integer REFERENCES users.department(department_id),
-    is_active boolean NOT NULL DEFAULT true
+CREATE TABLE IF NOT EXISTS users.end_user (
+    user_id         SERIAL PRIMARY KEY,
+    username        TEXT NOT NULL UNIQUE,
+    full_name       TEXT NOT NULL,
+    department_id   INTEGER REFERENCES users.department(department_id),
+    is_active       BOOLEAN NOT NULL DEFAULT true
 );
 
-GRANT ALL
-    ON SCHEMA users
-    TO admin;
+-- ---------------------------------------------------------------------
+-- Seed data: 5 departments, 10 fictional end users
+-- ---------------------------------------------------------------------
+INSERT INTO users.department (code, name) VALUES
+    ('SALES', 'Sales'),
+    ('ENG',   'Engineering'),
+    ('FIN',   'Finance'),
+    ('HR',    'Human Resources'),
+    ('OPS',   'Operations')
+ON CONFLICT (code) DO NOTHING;
 
-GRANT SELECT, INSERT, UPDATE, DELETE
-    ON ALL TABLES IN SCHEMA users
-    TO admin;
+INSERT INTO users.end_user (username, full_name, department_id, is_active) VALUES
+    ('asalo',    'Aino Salo',      (SELECT department_id FROM users.department WHERE code = 'SALES'), true),
+    ('mvirta',   'Mikko Virtanen', (SELECT department_id FROM users.department WHERE code = 'ENG'),   true),
+    ('lkoski',   'Liisa Koskinen', (SELECT department_id FROM users.department WHERE code = 'ENG'),   true),
+    ('jheikki',  'Juha Heikkinen', (SELECT department_id FROM users.department WHERE code = 'FIN'),   true),
+    ('sniemi',   'Sanna Niemi',    (SELECT department_id FROM users.department WHERE code = 'HR'),    true),
+    ('tlahti',   'Timo Lahtinen',  (SELECT department_id FROM users.department WHERE code = 'OPS'),   true),
+    ('kmaki',    'Kaisa Mäkinen',  (SELECT department_id FROM users.department WHERE code = 'SALES'), false),
+    ('pkorho',   'Pekka Korhonen', (SELECT department_id FROM users.department WHERE code = 'ENG'),   true),
+    ('hlaine',   'Hanna Laine',    (SELECT department_id FROM users.department WHERE code = 'FIN'),   true),
+    ('avirt',    'Antti Virtala',  (SELECT department_id FROM users.department WHERE code = 'OPS'),   false)
+ON CONFLICT (username) DO NOTHING;
 
-GRANT USAGE, SELECT
-    ON ALL SEQUENCES IN SCHEMA users
-    TO admin;
+-- ---------------------------------------------------------------------
+-- Grants: read-only across the schema
+-- ---------------------------------------------------------------------
+GRANT USAGE ON SCHEMA users TO users_reader;
+GRANT SELECT ON ALL TABLES IN SCHEMA users TO users_reader;
+ALTER DEFAULT PRIVILEGES IN SCHEMA users GRANT SELECT ON TABLES TO users_reader;
 
-GRANT USAGE
-    ON SCHEMA users
-    TO core_reader;
-
-GRANT SELECT
-    ON ALL TABLES IN SCHEMA users
-    TO core_reader;
-
-GRANT SELECT
-    ON ALL SEQUENCES IN SCHEMA users
-    TO core_reader;
-
-ALTER DEFAULT PRIVILEGES FOR ROLE admin IN SCHEMA users
-    GRANT SELECT ON TABLES TO core_reader;
-
-ALTER DEFAULT PRIVILEGES FOR ROLE admin IN SCHEMA users
-    GRANT SELECT ON SEQUENCES TO core_reader;
-
-INSERT INTO users.department (code, name)
-VALUES
-    ('sales', 'Sales'),
-    ('eng', 'Engineering');
-
-INSERT INTO users.end_user (
-    username,
-    full_name,
-    department_id
-)
-SELECT
-    'alice',
-    'Alice Example',
-    department_id
-FROM users.department
-WHERE code = 'sales';
-
-INSERT INTO users.end_user (
-    username,
-    full_name,
-    department_id
-)
-SELECT
-    'bob',
-    'Bob Example',
-    department_id
-FROM users.department
-WHERE code = 'eng';
+GRANT ALL PRIVILEGES ON SCHEMA users TO CURRENT_USER;
