@@ -14,7 +14,7 @@ services:
   # PostgreSQL databases
   # ---------------------------------------------------------------------
   staging:
-    image: docker.io/library/postgres:16-bookworm
+    image: docker.io/library/postgres:17
     container_name: dw-staging
     hostname: staging
     environment:
@@ -42,7 +42,7 @@ services:
       retries: 10
 
   users:
-    image: docker.io/library/postgres:16-bookworm
+    image: docker.io/library/postgres:17
     container_name: dw-users
     hostname: users
     environment:
@@ -68,7 +68,7 @@ services:
       retries: 10
 
   core:
-    image: docker.io/library/postgres:16-bookworm
+    image: docker.io/library/postgres:17
     container_name: dw-core
     hostname: core
     environment:
@@ -107,7 +107,7 @@ services:
       retries: 10
 
   mart:
-    image: docker.io/library/postgres:16-bookworm
+    image: docker.io/library/postgres:17
     container_name: dw-mart
     hostname: mart
     environment:
