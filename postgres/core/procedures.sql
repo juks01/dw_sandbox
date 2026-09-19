@@ -128,6 +128,7 @@ DECLARE
     col RECORD;
     dim_name TEXT;
     col_list TEXT;
+    data_col_list TEXT;
     bk_expr TEXT;
     hash_expr TEXT;
     has_id BOOLEAN;
@@ -190,33 +191,62 @@ BEGIN
         FROM information_schema.columns
         WHERE table_schema = 'staging_ext' AND table_name = tbl.table_name;
 
+        SELECT COALESCE(
+            string_agg(format('s.%I', column_name), ', ' ORDER BY ordinal_position),
+            'NULL::text'
+        )
+        INTO data_col_list
+        FROM information_schema.columns
+        WHERE table_schema = 'staging_ext'
+          AND table_name = tbl.table_name
+          AND column_name NOT IN ('_row_id', '_source_batch_id', '_parent_id', '_row_index');
+
         SELECT EXISTS (
             SELECT 1 FROM information_schema.columns
             WHERE table_schema = 'staging_ext' AND table_name = tbl.table_name AND column_name = 'id'
         ) INTO has_id;
 
-        hash_expr := format('md5((%s)::text)', col_list);
-        bk_expr := CASE WHEN has_id THEN 'id::text' ELSE hash_expr END;
+        hash_expr := format('md5(COALESCE((%s)::text, ''''))', data_col_list);
+        bk_expr := CASE WHEN has_id THEN 's.id::text' ELSE hash_expr END;
 
         -- 1) close current dim rows whose content changed in the source
         sql := format(
-            'UPDATE core.%I d SET valid_to = now(), is_current = false
-             WHERE d.is_current AND EXISTS (
-               SELECT 1 FROM staging_ext.%I s
-               WHERE (%s) = d._business_key AND (%s) <> d._content_hash
-             )',
-            dim_name, tbl.table_name, bk_expr, hash_expr
+            'WITH latest AS (
+                    SELECT DISTINCT ON ((%s)) *
+                    FROM staging_ext.%I s
+                    WHERE s._source_batch_id = (
+                        SELECT max(batch._source_batch_id)
+                        FROM staging_ext.%I batch
+                    )
+                    ORDER BY (%s), s._source_batch_id DESC, s._row_index DESC, s._row_id DESC
+                )
+                UPDATE core.%I d SET valid_to = now(), is_current = false
+                WHERE d.is_current AND EXISTS (
+                    SELECT 1 FROM latest s
+                    WHERE (%s) = d._business_key
+                        AND (%s) IS DISTINCT FROM d._content_hash
+                )',
+            bk_expr, tbl.table_name, tbl.table_name, bk_expr, dim_name, bk_expr, hash_expr
         );
         EXECUTE sql;
         GET DIAGNOSTICS v_closed1 = ROW_COUNT;
 
         -- 2) close current dim rows whose business key disappeared from the source
         sql := format(
-            'UPDATE core.%I d SET valid_to = now(), is_current = false
-             WHERE d.is_current AND NOT EXISTS (
-               SELECT 1 FROM staging_ext.%I s WHERE (%s) = d._business_key
-             )',
-            dim_name, tbl.table_name, bk_expr
+            'WITH latest AS (
+                    SELECT DISTINCT ON ((%s)) *
+                    FROM staging_ext.%I s
+                    WHERE s._source_batch_id = (
+                        SELECT max(batch._source_batch_id)
+                        FROM staging_ext.%I batch
+                    )
+                    ORDER BY (%s), s._source_batch_id DESC, s._row_index DESC, s._row_id DESC
+                )
+                UPDATE core.%I d SET valid_to = now(), is_current = false
+                WHERE d.is_current AND NOT EXISTS (
+                    SELECT 1 FROM latest s WHERE (%s) = d._business_key
+                )',
+            bk_expr, tbl.table_name, tbl.table_name, bk_expr, dim_name, bk_expr
         );
         EXECUTE sql;
         GET DIAGNOSTICS v_closed2 = ROW_COUNT;
@@ -224,13 +254,23 @@ BEGIN
         -- 3) insert current versions for anything not already current
         --    (covers brand-new business keys and rows just closed in step 1)
         sql := format(
-            'INSERT INTO core.%I (%s, _business_key, valid_from, valid_to, is_current, _content_hash)
-             SELECT %s, (%s), now(), NULL, true, (%s)
-             FROM staging_ext.%I s
-             WHERE NOT EXISTS (
-               SELECT 1 FROM core.%I d WHERE d.is_current AND d._business_key = (%s)
-             )',
-            dim_name, col_list, col_list, bk_expr, hash_expr, tbl.table_name, dim_name, bk_expr
+            'WITH latest AS (
+                    SELECT DISTINCT ON ((%s)) *
+                    FROM staging_ext.%I s
+                    WHERE s._source_batch_id = (
+                        SELECT max(batch._source_batch_id)
+                        FROM staging_ext.%I batch
+                    )
+                    ORDER BY (%s), s._source_batch_id DESC, s._row_index DESC, s._row_id DESC
+                )
+                INSERT INTO core.%I (%s, _business_key, valid_from, valid_to, is_current, _content_hash)
+                SELECT %s, (%s), now(), NULL, true, (%s)
+                FROM latest s
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM core.%I d WHERE d.is_current AND d._business_key = (%s)
+                )',
+            bk_expr, tbl.table_name, tbl.table_name, bk_expr, dim_name, col_list, col_list,
+            bk_expr, hash_expr, dim_name, bk_expr
         );
         EXECUTE sql;
         GET DIAGNOSTICS v_inserted = ROW_COUNT;
