@@ -33,7 +33,17 @@ def health() -> dict:
 
 @app.post("/load")
 def load(req: LoadRequest) -> dict:
-    file_path = LANDING_DIR / req.filename
+    req_filename = Path(req.filename)
+
+    if req_filename.name != req.filename:
+        raise HTTPException(status_code=400, detail="invalid landing filename")
+
+    file_path = (LANDING_DIR / req_filename).resolve()
+    landing_root = LANDING_DIR.resolve()
+
+    if landing_root not in file_path.parents:
+        raise HTTPException(status_code=400, detail="invalid landing path")
+
     if not file_path.is_file():
         raise HTTPException(status_code=404, detail=f"landing file not found: {req.filename}")
 
