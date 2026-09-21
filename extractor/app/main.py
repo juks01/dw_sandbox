@@ -18,6 +18,8 @@ import httpx
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
+from .config import is_allowed_url
+
 LANDING_DIR = Path(os.environ.get("LANDING_DIR", "/landing"))
 USER_AGENT = os.environ.get("EXTRACTOR_USER_AGENT", "dw-dev-extractor/1.0")
 
@@ -74,24 +76,24 @@ def health() -> dict[str, str]:
 def extract(req: ExtractRequest) -> ExtractResponse:
     if not req.source.strip():
         raise HTTPException(status_code=400, detail="source is required")
+
     if not req.url.strip():
         raise HTTPException(status_code=400, detail="url is required")
 
-    if req.url.strip().lower() == "local://demo":
-        payload: Any = _build_local_fixture(req.source)
-        raw_bytes = json.dumps(payload).encode("utf-8")
-    else:
-        try:
-            resp = httpx.get(
-                req.url,
-                headers={"User-Agent": USER_AGENT},
-                timeout=30.0,
-                follow_redirects=True,
-            )
-            resp.raise_for_status()
-        except httpx.HTTPError as exc:
-            raise HTTPException(status_code=502, detail=f"upstream request failed: {exc}") from exc
-        raw_bytes = resp.content
+    if not is_allowed_url(req.url):
+        raise HTTPException(status_code=403, detail="url host is not allowed by extractor allowlist")
+
+    try:
+        resp = httpx.get(
+            req.url,
+            headers={"User-Agent": USER_AGENT},
+            timeout=30.0,
+            follow_redirects=True,
+        )
+        resp.raise_for_status()
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f"upstream request failed: {exc}") from exc
+    raw_bytes = resp.content
 
     ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%f")[:-3] + "Z"
     file_uuid = str(uuid.uuid4())
