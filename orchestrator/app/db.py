@@ -58,14 +58,6 @@ def init_db() -> None:
             )
             """
         )
-        # Seed one deterministic, fully offline demo source so the whole
-        # pipeline can be exercised immediately after startup (spec 18).
-        row = conn.execute("SELECT COUNT(*) AS c FROM sources").fetchone()
-        if row["c"] == 0:
-            conn.execute(
-                "INSERT INTO sources (name, url, cron, enabled, next_run) VALUES (?, ?, ?, 1, NULL)",
-                ("demo_source", "local://demo", "*/2 * * * *"),
-            )
 
 
 # ---------------------------------------------------------------------
