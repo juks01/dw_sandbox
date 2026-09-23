@@ -4,9 +4,9 @@ networks:
 
 volumes:
   staging_data:
-  users_data:
-  core_data:
-  mart_data:
+  # users_data:
+  # core_data:
+  # mart_data:
 
 services:
 
@@ -41,104 +41,104 @@ services:
       timeout: 5s
       retries: 10
 
-  users:
-    image: docker.io/library/postgres:17
-    container_name: dw-users
-    hostname: users
-    environment:
-      TZ: ${TZ}
-      POSTGRES_DB: ${USERS_DB}
-      POSTGRES_USER: ${ADMIN_USER}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
-      PG_LOCALE: ${PG_LOCALE}
-      ADMIN_USER: ${ADMIN_USER}
-      ADMIN_PASSWORD: ${ADMIN_PASSWORD}
-      USERS_READER_USER: ${USERS_READER_USER}
-      USERS_READER_PASSWORD: ${USERS_READER_PASSWORD}
-    volumes:
-      - users_data:/var/lib/postgresql/data
-      - ./postgres/users:/docker-entrypoint-initdb.d:z
-    ports:
-      - "${USERS_PORT}:5432"
-    networks: [dw]
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${ADMIN_USER} -d ${USERS_DB}"]
-      interval: 5s
-      timeout: 5s
-      retries: 10
+  # users:
+  #   image: docker.io/library/postgres:17
+  #   container_name: dw-users
+  #   hostname: users
+  #   environment:
+  #     TZ: ${TZ}
+  #     POSTGRES_DB: ${USERS_DB}
+  #     POSTGRES_USER: ${ADMIN_USER}
+  #     POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+  #     PG_LOCALE: ${PG_LOCALE}
+  #     ADMIN_USER: ${ADMIN_USER}
+  #     ADMIN_PASSWORD: ${ADMIN_PASSWORD}
+  #     USERS_READER_USER: ${USERS_READER_USER}
+  #     USERS_READER_PASSWORD: ${USERS_READER_PASSWORD}
+  #   volumes:
+  #     - users_data:/var/lib/postgresql/data
+  #     - ./postgres/users:/docker-entrypoint-initdb.d:z
+  #   ports:
+  #     - "${USERS_PORT}:5432"
+  #   networks: [dw]
+  #   healthcheck:
+  #     test: ["CMD-SHELL", "pg_isready -U ${ADMIN_USER} -d ${USERS_DB}"]
+  #     interval: 5s
+  #     timeout: 5s
+  #     retries: 10
 
-  core:
-    image: docker.io/library/postgres:17
-    container_name: dw-core
-    hostname: core
-    environment:
-      TZ: ${TZ}
-      POSTGRES_DB: ${CORE_DB}
-      POSTGRES_USER: ${ADMIN_USER}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
-      PG_LOCALE: ${PG_LOCALE}
-      ADMIN_USER: ${ADMIN_USER}
-      ADMIN_PASSWORD: ${ADMIN_PASSWORD}
-      CORE_READER_USER: ${CORE_READER_USER}
-      CORE_READER_PASSWORD: ${CORE_READER_PASSWORD}
-      CORE_SERVICE_USER: ${CORE_SERVICE_USER}
-      CORE_SERVICE_PASSWORD: ${CORE_SERVICE_PASSWORD}
-      STAGING_READER_USER: ${STAGING_READER_USER}
-      STAGING_READER_PASSWORD: ${STAGING_READER_PASSWORD}
-      USERS_READER_USER: ${USERS_READER_USER}
-      USERS_READER_PASSWORD: ${USERS_READER_PASSWORD}
-      STAGING_DB: ${STAGING_DB}
-      USERS_DB: ${USERS_DB}
-    volumes:
-      - core_data:/var/lib/postgresql/data
-      - ./postgres/core:/docker-entrypoint-initdb.d:z
-    ports:
-      - "${CORE_PORT}:5432"
-    networks: [dw]
-    depends_on:
-      staging:
-        condition: service_healthy
-      users:
-        condition: service_healthy
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${ADMIN_USER} -d ${CORE_DB}"]
-      interval: 5s
-      timeout: 5s
-      retries: 10
+  # core:
+  #   image: docker.io/library/postgres:17
+  #   container_name: dw-core
+  #   hostname: core
+  #   environment:
+  #     TZ: ${TZ}
+  #     POSTGRES_DB: ${CORE_DB}
+  #     POSTGRES_USER: ${ADMIN_USER}
+  #     POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+  #     PG_LOCALE: ${PG_LOCALE}
+  #     ADMIN_USER: ${ADMIN_USER}
+  #     ADMIN_PASSWORD: ${ADMIN_PASSWORD}
+  #     CORE_READER_USER: ${CORE_READER_USER}
+  #     CORE_READER_PASSWORD: ${CORE_READER_PASSWORD}
+  #     CORE_SERVICE_USER: ${CORE_SERVICE_USER}
+  #     CORE_SERVICE_PASSWORD: ${CORE_SERVICE_PASSWORD}
+  #     STAGING_READER_USER: ${STAGING_READER_USER}
+  #     STAGING_READER_PASSWORD: ${STAGING_READER_PASSWORD}
+  #     USERS_READER_USER: ${USERS_READER_USER}
+  #     USERS_READER_PASSWORD: ${USERS_READER_PASSWORD}
+  #     STAGING_DB: ${STAGING_DB}
+  #     USERS_DB: ${USERS_DB}
+  #   volumes:
+  #     - core_data:/var/lib/postgresql/data
+  #     - ./postgres/core:/docker-entrypoint-initdb.d:z
+  #   ports:
+  #     - "${CORE_PORT}:5432"
+  #   networks: [dw]
+  #   depends_on:
+  #     staging:
+  #       condition: service_healthy
+  #     users:
+  #       condition: service_healthy
+  #   healthcheck:
+  #     test: ["CMD-SHELL", "pg_isready -U ${ADMIN_USER} -d ${CORE_DB}"]
+  #     interval: 5s
+  #     timeout: 5s
+  #     retries: 10
 
-  mart:
-    image: docker.io/library/postgres:17
-    container_name: dw-mart
-    hostname: mart
-    environment:
-      TZ: ${TZ}
-      POSTGRES_DB: ${MART_DB}
-      POSTGRES_USER: ${ADMIN_USER}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
-      PG_LOCALE: ${PG_LOCALE}
-      ADMIN_USER: ${ADMIN_USER}
-      ADMIN_PASSWORD: ${ADMIN_PASSWORD}
-      MART_SERVICE_USER: ${MART_SERVICE_USER}
-      MART_SERVICE_PASSWORD: ${MART_SERVICE_PASSWORD}
-      REPORTING_USER: ${REPORTING_USER}
-      REPORTING_PASSWORD: ${REPORTING_PASSWORD}
-      CORE_READER_USER: ${CORE_READER_USER}
-      CORE_READER_PASSWORD: ${CORE_READER_PASSWORD}
-      CORE_DB: ${CORE_DB}
-    volumes:
-      - mart_data:/var/lib/postgresql/data
-      - ./postgres/mart:/docker-entrypoint-initdb.d:z
-    ports:
-      - "${MART_PORT}:5432"
-    networks: [dw]
-    depends_on:
-      core:
-        condition: service_healthy
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${ADMIN_USER} -d ${MART_DB}"]
-      interval: 5s
-      timeout: 5s
-      retries: 10
+  # mart:
+  #   image: docker.io/library/postgres:17
+  #   container_name: dw-mart
+  #   hostname: mart
+  #   environment:
+  #     TZ: ${TZ}
+  #     POSTGRES_DB: ${MART_DB}
+  #     POSTGRES_USER: ${ADMIN_USER}
+  #     POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+  #     PG_LOCALE: ${PG_LOCALE}
+  #     ADMIN_USER: ${ADMIN_USER}
+  #     ADMIN_PASSWORD: ${ADMIN_PASSWORD}
+  #     MART_SERVICE_USER: ${MART_SERVICE_USER}
+  #     MART_SERVICE_PASSWORD: ${MART_SERVICE_PASSWORD}
+  #     REPORTING_USER: ${REPORTING_USER}
+  #     REPORTING_PASSWORD: ${REPORTING_PASSWORD}
+  #     CORE_READER_USER: ${CORE_READER_USER}
+  #     CORE_READER_PASSWORD: ${CORE_READER_PASSWORD}
+  #     CORE_DB: ${CORE_DB}
+  #   volumes:
+  #     - mart_data:/var/lib/postgresql/data
+  #     - ./postgres/mart:/docker-entrypoint-initdb.d:z
+  #   ports:
+  #     - "${MART_PORT}:5432"
+  #   networks: [dw]
+  #   depends_on:
+  #     core:
+  #       condition: service_healthy
+  #   healthcheck:
+  #     test: ["CMD-SHELL", "pg_isready -U ${ADMIN_USER} -d ${MART_DB}"]
+  #     interval: 5s
+  #     timeout: 5s
+  #     retries: 10
 
   # ---------------------------------------------------------------------
   # Application services
@@ -205,16 +205,16 @@ services:
       STAGING_DB: ${STAGING_DB}
       STAGING_READER_USER: ${STAGING_READER_USER}
       STAGING_READER_PASSWORD: ${STAGING_READER_PASSWORD}
-      CORE_HOST: ${CORE_HOST}
-      CORE_PORT: ${CORE_PORT}
-      CORE_DB: ${CORE_DB}
-      CORE_SERVICE_USER: ${CORE_SERVICE_USER}
-      CORE_SERVICE_PASSWORD: ${CORE_SERVICE_PASSWORD}
-      MART_HOST: ${MART_HOST}
-      MART_PORT: ${MART_PORT}
-      MART_DB: ${MART_DB}
-      MART_SERVICE_USER: ${MART_SERVICE_USER}
-      MART_SERVICE_PASSWORD: ${MART_SERVICE_PASSWORD}
+      # CORE_HOST: ${CORE_HOST}
+      # CORE_PORT: ${CORE_PORT}
+      # CORE_DB: ${CORE_DB}
+      # CORE_SERVICE_USER: ${CORE_SERVICE_USER}
+      # CORE_SERVICE_PASSWORD: ${CORE_SERVICE_PASSWORD}
+      # MART_HOST: ${MART_HOST}
+      # MART_PORT: ${MART_PORT}
+      # MART_DB: ${MART_DB}
+      # MART_SERVICE_USER: ${MART_SERVICE_USER}
+      # MART_SERVICE_PASSWORD: ${MART_SERVICE_PASSWORD}
     volumes:
       - ./orchestrator/data:/data:z
       - ./extractor/conf/allowed_hosts:/config/allowed_hosts:ro,z
@@ -226,10 +226,10 @@ services:
         condition: service_healthy
       loader:
         condition: service_healthy
-      core:
-        condition: service_healthy
-      mart:
-        condition: service_healthy
+      # core:
+      #   condition: service_healthy
+      # mart:
+      #   condition: service_healthy
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://localhost:8000/health',timeout=5)"]
       interval: 5s

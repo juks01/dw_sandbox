@@ -78,8 +78,8 @@ def full_health() -> dict[str, Any]:
         "extractor": check_extractor(),
         "loader": check_loader(),
         "staging": check_staging(),
-        "core": check_core(),
-        "mart": check_mart(),
+        # "core": check_core(),
+        # "mart": check_mart(),
     }
     return {"status": "ok" if all(checks.values()) else "degraded", "dependencies": checks}
 
@@ -143,11 +143,9 @@ class PipelineError(Exception):
 
 
 def run_pipeline_steps(source_name: str, source_url: str, run_id: int) -> None:
-    """Runs extract -> load -> core -> mart sequentially, updating the run
-    row after every step. Raises PipelineError (caller marks run failed)."""
+    """Runs extract -> load while core and mart are disabled on this branch."""
 
-    # Pre-flight dependency health checks (spec section 9): don't even start
-    # a pipeline run against a dependency we know is down.
+    # Pre-flight dependency health checks: don't start against a known-down dependency.
     health = full_health()
     if not all(health["dependencies"].values()):
         down = [k for k, v in health["dependencies"].items() if not v]
@@ -195,27 +193,27 @@ def run_pipeline_steps(source_name: str, source_url: str, run_id: int) -> None:
     if load_result.get("batch_id") is not None:
         db.update_run(run_id, batch_id=str(load_result["batch_id"]))
 
-    loaded_table_names: set[str] = set(load_result.get("tables") or {})
+    # loaded_table_names: set[str] = set(load_result.get("tables") or {})
 
     # ---- core ----
-    db.update_run(run_id, step="core")
-    try:
-        core_synced = call_core_sync(loaded_table_names)
-    except PipelineError:
-        raise
-    except Exception as exc:
-        raise PipelineError("core", str(exc)) from exc
+    # db.update_run(run_id, step="core")
+    # try:
+    #     core_synced = call_core_sync(loaded_table_names)
+    # except PipelineError:
+    #     raise
+    # except Exception as exc:
+    #     raise PipelineError("core", str(exc)) from exc
 
     # ---- mart ----
-    db.update_run(run_id, step="mart")
-    expected_dim_tables = {
-        row["dim_table"] for row in core_synced if row["source_table"] in loaded_table_names
-    }
-    try:
-        call_mart_refresh(expected_dim_tables)
-    except PipelineError:
-        raise
-    except Exception as exc:
-        raise PipelineError("mart", str(exc)) from exc
+    # db.update_run(run_id, step="mart")
+    # expected_dim_tables = {
+    #     row["dim_table"] for row in core_synced if row["source_table"] in loaded_table_names
+    # }
+    # try:
+    #     call_mart_refresh(expected_dim_tables)
+    # except PipelineError:
+    #     raise
+    # except Exception as exc:
+    #     raise PipelineError("mart", str(exc)) from exc
 
     db.update_run(run_id, status="done", step="done", finished=db.now_iso())

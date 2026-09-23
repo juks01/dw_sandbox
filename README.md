@@ -8,6 +8,25 @@ SOURCE/API → EXTRACTOR → LANDING → LOADER → STAGING → CORE → MART �
 
 ORCHESTRATOR (schedule, run, GUI)
 ```
+
+On the `feature/ingestion-staging` branch, development is intentionally
+limited to `extractor`, `loader`, `staging`, and `orchestrator`. The `users`,
+`core`, and `mart` database services remain in the repository but are not
+started until their development phase begins.
+
+Each extraction writes a readable payload filename and a matching manifest:
+
+```
+data/landing/
+  products_20260923T120000Z_<uuid>.json
+  products_20260923T120000Z_<uuid>.manifest.json
+```
+
+The payload remains unchanged from the source. The manifest contains the run
+ID, source and URL, final URL, fetch time, HTTP status, content type, byte
+size, and SHA-256 checksum. The loader only loads a payload when its manifest
+exists, names the same payload, and contains a matching checksum. Both files
+are written atomically by the extractor.
 ## First
 Copy .env file template as .env file. You may use default values in dev. NEVER use default values in production!
 ```bash

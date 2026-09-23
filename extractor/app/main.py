@@ -7,11 +7,12 @@ from __future__ import annotations
 
 import json
 import os
+import hashlib
+import tempfile
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
-from urllib.parse import urlparse
 
 import httpx
 from fastapi import FastAPI, HTTPException
@@ -33,6 +34,7 @@ class ExtractRequest(BaseModel):
 
 class ExtractResponse(BaseModel):
     filename: str
+    manifest_filename: str
     source: str
     source_url: str
 
@@ -78,9 +80,11 @@ def extract(req: ExtractRequest) -> ExtractResponse:
     file_uuid = str(uuid.uuid4())
     slug = _safe_source_slug(req.source)
     filename = f"{slug}_{ts}_{file_uuid}.json"
+    manifest_filename = f"{slug}_{ts}_{file_uuid}.manifest.json"
 
     LANDING_DIR.mkdir(parents=True, exist_ok=True)
     dest = LANDING_DIR / filename
+    manifest_dest = LANDING_DIR / manifest_filename
 
     # Validate it's actually JSON before writing (payload must stay as
     # unmodified as possible, but we do want to fail fast on garbage).
@@ -89,9 +93,48 @@ def extract(req: ExtractRequest) -> ExtractResponse:
     except json.JSONDecodeError as exc:
         raise HTTPException(status_code=502, detail=f"upstream response is not valid JSON: {exc}") from exc
 
-    dest.write_bytes(raw_bytes)
+    fetched_at = datetime.now(timezone.utc).isoformat()
+    manifest = {
+        "manifest_version": 1,
+        "status": "extracted",
+        "source": req.source,
+        "run_id": req.run_id,
+        "requested_url": req.url,
+        "final_url": str(resp.url),
+        "fetched_at": fetched_at,
+        "http_status": resp.status_code,
+        "content_type": resp.headers.get("content-type"),
+        "byte_size": len(raw_bytes),
+        "sha256": hashlib.sha256(raw_bytes).hexdigest(),
+        "payload_filename": filename,
+    }
 
-    return ExtractResponse(filename=filename, source=req.source, source_url=req.url)
+    _write_atomically(dest, raw_bytes)
+    _write_atomically(
+        manifest_dest,
+        json.dumps(manifest, ensure_ascii=True, indent=2).encode("utf-8") + b"\n",
+    )
+
+    return ExtractResponse(
+        filename=filename,
+        manifest_filename=manifest_filename,
+        source=req.source,
+        source_url=req.url,
+    )
+
+
+def _write_atomically(destination: Path, content: bytes) -> None:
+    """Make a completed file visible only after all bytes have been written."""
+    with tempfile.NamedTemporaryFile(dir=destination.parent, prefix=f".{destination.name}.", delete=False) as tmp:
+        temporary_path = Path(tmp.name)
+        tmp.write(content)
+        tmp.flush()
+        os.fsync(tmp.fileno())
+    try:
+        os.replace(temporary_path, destination)
+    except Exception:
+        temporary_path.unlink(missing_ok=True)
+        raise
 
 
 def _fetch_http_source(url: str) -> bytes:
