@@ -143,11 +143,9 @@ class PipelineError(Exception):
 
 
 def run_pipeline_steps(source_name: str, source_url: str, run_id: int) -> None:
-    """Runs extract -> load -> core -> mart sequentially, updating the run
-    row after every step. Raises PipelineError (caller marks run failed)."""
+    """Runs extract -> load while core and mart are disabled on this branch."""
 
-    # Pre-flight dependency health checks (spec section 9): don't even start
-    # a pipeline run against a dependency we know is down.
+    # Pre-flight dependency health checks: don't start against a known-down dependency.
     health = full_health()
     if not all(health["dependencies"].values()):
         down = [k for k, v in health["dependencies"].items() if not v]
