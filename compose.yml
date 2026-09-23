@@ -196,6 +196,7 @@ services:
       ORCH_USER: ${ORCH_USER}
       ORCH_PASSWORD: ${ORCH_PASSWORD}
       ORCH_SQLITE_PATH: ${ORCH_SQLITE_PATH}
+      ALLOWED_HOSTS_PATH: /config/allowed_hosts
       ORCH_SCHEDULER_INTERVAL_SECONDS: ${ORCH_SCHEDULER_INTERVAL_SECONDS}
       EXTRACTOR_URL: ${EXTRACTOR_URL}
       LOADER_URL: ${LOADER_URL}
@@ -216,6 +217,7 @@ services:
       MART_SERVICE_PASSWORD: ${MART_SERVICE_PASSWORD}
     volumes:
       - ./orchestrator/data:/data:z
+      - ./extractor/conf/allowed_hosts:/config/allowed_hosts:ro,z
     ports:
       - "${ORCHESTRATOR_PORT}:8000"
     networks: [dw]

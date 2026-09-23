@@ -163,6 +163,16 @@ def run_pipeline_steps(source_name: str, source_url: str, run_id: int) -> None:
         )
         resp.raise_for_status()
         extract_result = resp.json()
+    except httpx.HTTPStatusError as exc:
+        detail = exc.response.text.strip()
+        try:
+            payload = exc.response.json()
+            detail = str(payload.get("detail", detail))
+        except ValueError:
+            pass
+        raise PipelineError("extract", f"extractor returned HTTP {exc.response.status_code}: {detail}") from exc
+    except httpx.RequestError as exc:
+        raise PipelineError("extract", f"extractor request failed: {exc}") from exc
     except Exception as exc:
         raise PipelineError("extract", str(exc)) from exc
 

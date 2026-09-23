@@ -19,9 +19,9 @@ cp .env-example .env
 ```bash
 podman compose up --build
 ```
-First boot creates the databases, roles, a demo user/department
-dataset, and one fully offline demo pipeline source (`local://demo`) so you
-can see data flow through the whole system without any external API.
+First boot creates the databases, roles, and a demo user/department
+dataset. An offline demo source is configured through the allowlist file,
+so you can see data flow through the whole system without any external API.
 For another data source you can use for example https://dummyjson.com/products .
 
 ## Delete environment
@@ -76,11 +76,11 @@ triggering a source that is already running returns HTTP 409.
 
 ## Adding a new source
 Nothing else in the pipeline needs to change. Add it through the GUI (or
-`POST /api/sources`) with a name, a URL (or `local://demo` for the offline
-fixture), and a cron expression. The loader creates/adapts staging tables
-automatically; `core.sync_from_staging()` discovers new staging tables and
-builds/maintains the matching `core.dim_*` SCD2 tables; `mart.refresh()`
-picks up every `core.dim_*` table automatically.
+`POST /api/sources`) with a name, a URL, and a cron expression. The loader
+creates/adapts staging tables automatically; `core.sync_from_staging()`
+discovers new staging tables and builds/maintains the matching
+`core.dim_*` SCD2 tables; `mart.refresh()` picks up every `core.dim_*`
+table automatically.
 
 ## Cron examples
 ```

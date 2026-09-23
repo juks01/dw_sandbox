@@ -1,18 +1,17 @@
 """Extractor service.
 
-Responsible only for fetching an external source over HTTP and writing the
-raw response, byte-for-byte, into the landing zone. Deliberately has no
-database dependency at all.
+Responsible for fetching configured sources and writing the raw response into
+the landing zone. It has no database dependency.
 """
 from __future__ import annotations
 
 import json
 import os
-import random
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
+from urllib.parse import urlparse
 
 import httpx
 from fastapi import FastAPI, HTTPException
@@ -45,28 +44,6 @@ def _safe_source_slug(source: str) -> str:
     return slug[:64]
 
 
-def _build_local_fixture(source: str) -> dict[str, Any]:
-    """
-    Deterministic, dependency-free test source (section 18).
-    Used whenever url == "local://demo" so the whole pipeline
-    (extract -> landing -> staging -> core -> mart) can be exercised
-    fully offline, without any external API.
-    """
-    return {
-        "id": random.randint(1000, 9999),
-        "name": f"{source}-demo-record",
-        "department": {
-            "id": random.choice([1, 2, 3, 4, 5]),
-            "name": random.choice(["Sales", "Engineering", "Finance", "HR", "Operations"]),
-        },
-        "orders": [
-            {"id": i, "amount": round(random.uniform(10, 500), 2)}
-            for i in range(1, random.randint(2, 4))
-        ],
-        "generated_at": datetime.now(timezone.utc).isoformat(),
-    }
-
-
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
@@ -91,6 +68,8 @@ def extract(req: ExtractRequest) -> ExtractResponse:
             follow_redirects=True,
         )
         resp.raise_for_status()
+    except httpx.UnsupportedProtocol as exc:
+        raise HTTPException(status_code=400, detail=f"URL scheme is not supported by extractor transport: {exc}") from exc
     except httpx.HTTPError as exc:
         raise HTTPException(status_code=502, detail=f"upstream request failed: {exc}") from exc
     raw_bytes = resp.content
@@ -113,3 +92,17 @@ def extract(req: ExtractRequest) -> ExtractResponse:
     dest.write_bytes(raw_bytes)
 
     return ExtractResponse(filename=filename, source=req.source, source_url=req.url)
+
+
+def _fetch_http_source(url: str) -> bytes:
+    try:
+        resp = httpx.get(
+            url,
+            headers={"User-Agent": USER_AGENT},
+            timeout=30.0,
+            follow_redirects=True,
+        )
+        resp.raise_for_status()
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f"upstream request failed: {exc}") from exc
+    return resp.content

@@ -23,26 +23,27 @@ def is_allowed_url(raw_url: str) -> bool:
     if not value:
         return False
 
+    allowed_hosts = _read_allowed_hosts_from_file()
+    normalized_allowed = {host.strip().lower() for host in allowed_hosts}
+    if value in normalized_allowed:
+        return True
+
     try:
         parsed = urlparse(value)
     except ValueError:
         return False
 
-    allowed_hosts = _read_allowed_hosts_from_file()
+    host = (parsed.hostname or "").lower()
+    if not host:
+        return False
+
     for host in allowed_hosts:
         candidate = host.strip().lower()
         if candidate.startswith("*."):
             suffix = candidate[2:]
-            if host.endswith(f".{suffix}") or host == suffix:
+            if host == suffix or host.endswith(f".{suffix}"):
                 return True
         if host == candidate:
             return True
-
-    if parsed.scheme not in {"http", "https"}:
-        return False
-
-    host = (parsed.hostname or "").lower()
-    if not host:
-        return False
 
     return False
