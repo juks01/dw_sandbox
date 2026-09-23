@@ -219,7 +219,7 @@ services:
       - ./orchestrator/data:/data:z
       - ./extractor/conf/allowed_hosts:/config/allowed_hosts:ro,z
     ports:
-      - "${ORCHESTRATOR_PORT}:8000"
+      - "${ORCHESTRATOR_PORT}:8080"
     networks: [dw]
     depends_on:
       extractor:
