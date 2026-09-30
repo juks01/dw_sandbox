@@ -58,6 +58,13 @@ def init_db() -> None:
             )
             """
         )
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO sources (name, url, cron, enabled, next_run)
+            VALUES (?, ?, ?, 1, NULL)
+            """,
+            ("demo-products", "local://demo", "*/2 * * * *"),
+        )
 
 
 # ---------------------------------------------------------------------
