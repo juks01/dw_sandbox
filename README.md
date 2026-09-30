@@ -39,8 +39,11 @@ cp .env-example .env
 podman compose up --build
 ```
 First boot creates the databases, roles, and a demo user/department
-dataset. An offline demo source is configured through the allowlist file,
-so you can see data flow through the whole system without any external API.
+dataset. The orchestrator also seeds an enabled `demo-products` source
+(`local://demo`, every two minutes). The extractor serves its bundled
+`extractor/conf/demo.json` fixture for that URL, so the pipeline can run
+without an external API. The allowlist still controls which HTTP(S) hosts
+the extractor may contact.
 For another data source you can use for example https://dummyjson.com/products .
 
 ## Delete environment
