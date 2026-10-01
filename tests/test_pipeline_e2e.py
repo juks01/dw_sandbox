@@ -27,15 +27,20 @@ def _load_dev_env() -> None:
         os.environ.setdefault(key.strip(), value.strip().strip("\"'"))
 
 
-def _db_settings(prefix: str, *, user_key: str, password_key: str, default_user: str,
-                 default_password: str, db_key: str, default_db: str,
-                 port_key: str, default_port: int) -> dict:
+def _required_setting(name: str) -> str:
+    value = os.environ.get(name)
+    if not value:
+        raise RuntimeError(f"missing required test setting: {name}")
+    return value
+
+
+def _db_settings(prefix: str, *, user_key: str, password_key: str, db_key: str) -> dict:
     return {
-        "host": os.environ.get(f"DW_TEST_{prefix}_HOST", "localhost"),
-        "port": int(os.environ.get(f"DW_TEST_{prefix}_PORT", os.environ.get(port_key, default_port))),
-        "dbname": os.environ.get(db_key, default_db),
-        "user": os.environ.get(user_key, default_user),
-        "password": os.environ.get(password_key, default_password),
+        "host": _required_setting(f"DW_TEST_{prefix}_HOST"),
+        "port": int(_required_setting(f"DW_TEST_{prefix}_PORT")),
+        "dbname": _required_setting(db_key),
+        "user": _required_setting(user_key),
+        "password": _required_setting(password_key),
         "connect_timeout": 5,
     }
 
@@ -67,33 +72,27 @@ class ExtractorToMartTests(unittest.TestCase):
 
         cls.staging = _db_settings(
             "STAGING", user_key="LOADER_WRITER_USER", password_key="LOADER_WRITER_PASSWORD",
-            default_user="loader_writer", default_password="loaderpass", db_key="STAGING_DB",
-            default_db="staging", port_key="STAGING_PORT", default_port=5433,
+            db_key="STAGING_DB",
         )
         cls.core_admin = _db_settings(
             "CORE", user_key="ADMIN_USER", password_key="POSTGRES_PASSWORD",
-            default_user="admin", default_password="devpassword", db_key="CORE_DB",
-            default_db="core", port_key="CORE_PORT", default_port=5434,
+            db_key="CORE_DB",
         )
         cls.core_reader = _db_settings(
             "CORE", user_key="CORE_READER_USER", password_key="CORE_READER_PASSWORD",
-            default_user="core_reader", default_password="corereaderpass", db_key="CORE_DB",
-            default_db="core", port_key="CORE_PORT", default_port=5434,
+            db_key="CORE_DB",
         )
         cls.core_service = _db_settings(
             "CORE", user_key="CORE_SERVICE_USER", password_key="CORE_SERVICE_PASSWORD",
-            default_user="core_service", default_password="coreservicepass", db_key="CORE_DB",
-            default_db="core", port_key="CORE_PORT", default_port=5434,
+            db_key="CORE_DB",
         )
         cls.mart_admin = _db_settings(
             "MART", user_key="ADMIN_USER", password_key="POSTGRES_PASSWORD",
-            default_user="admin", default_password="devpassword", db_key="MART_DB",
-            default_db="mart", port_key="MART_PORT", default_port=5435,
+            db_key="MART_DB",
         )
         cls.reporting = _db_settings(
             "MART", user_key="REPORTING_USER", password_key="REPORTING_PASSWORD",
-            default_user="reporting", default_password="reportingpass", db_key="MART_DB",
-            default_db="mart", port_key="MART_PORT", default_port=5435,
+            db_key="MART_DB",
         )
 
         cls.extractor = importlib.import_module("extractor.app.main")
