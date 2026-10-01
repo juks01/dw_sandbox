@@ -91,6 +91,40 @@ scheduler (croniter, checks every 5s)
   → reporting  (read-only role, SELECT-only on mart.*)
 ```
 
+## Tests
+Run the unit tests in their service containers:
+```bash
+podman compose build extractor orchestrator
+podman compose run --rm --no-deps \
+  -v "$PWD:/workspace:z" -w /workspace \
+  extractor python -m unittest discover -s extractor/tests -v
+podman compose run --rm --no-deps \
+  -v "$PWD:/workspace:z" -w /workspace \
+  orchestrator python -m unittest discover -s orchestrator/tests -v
+```
+
+The extractor-to-mart integration tests use the local compose databases and
+are opt-in. Start the database services, build the orchestrator image, then
+run the suite inside that image (no host Python packages are needed):
+```bash
+podman compose up -d staging users core mart
+podman compose build orchestrator
+podman compose run --rm --no-deps \
+  -v "$PWD:/workspace:z" -w /workspace \
+  -e DW_E2E_TESTS=1 \
+  -e DW_TEST_STAGING_HOST=staging -e DW_TEST_STAGING_PORT=5432 \
+  -e DW_TEST_CORE_HOST=core -e DW_TEST_CORE_PORT=5432 \
+  -e DW_TEST_MART_HOST=mart -e DW_TEST_MART_PORT=5432 \
+  orchestrator python -m unittest discover -s tests -v
+```
+
+The integration suite creates a unique source and removes its staging, core,
+and mart tables afterward. `mart.refresh()` rebuilds all published mart
+tables, so run it against the local development stack rather than a shared
+environment. The `DW_TEST_*_HOST` and `DW_TEST_*_PORT` variables can be
+changed when the databases use different compose service names or internal
+ports.
+
 Every run is recorded in the orchestrator's own SQLite database
 (`orchestrator/data/orchestrator.db`) with its current step and, on failure,
 the error message. The same source can never run twice concurrently —
