@@ -7,11 +7,12 @@ from __future__ import annotations
 
 import json
 import os
+import hashlib
+import tempfile
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
-from urllib.parse import urlparse
 
 import httpx
 from fastapi import FastAPI, HTTPException
@@ -20,6 +21,7 @@ from pydantic import BaseModel
 from .config import is_allowed_url
 
 LANDING_DIR = Path(os.environ.get("LANDING_DIR", "/landing"))
+DEMO_PAYLOAD_PATH = Path(__file__).resolve().parent.parent / "conf" / "demo.json"
 USER_AGENT = os.environ.get("EXTRACTOR_USER_AGENT", "dw-dev-extractor/1.0")
 
 app = FastAPI(title="dw-dev extractor")
@@ -33,6 +35,7 @@ class ExtractRequest(BaseModel):
 
 class ExtractResponse(BaseModel):
     filename: str
+    manifest_filename: str
     source: str
     source_url: str
 
@@ -60,27 +63,55 @@ def extract(req: ExtractRequest) -> ExtractResponse:
     if not is_allowed_url(req.url):
         raise HTTPException(status_code=403, detail="url host is not allowed by extractor allowlist")
 
-    try:
-        resp = httpx.get(
-            req.url,
-            headers={"User-Agent": USER_AGENT},
-            timeout=30.0,
-            follow_redirects=True,
-        )
-        resp.raise_for_status()
-    except httpx.UnsupportedProtocol as exc:
-        raise HTTPException(status_code=400, detail=f"URL scheme is not supported by extractor transport: {exc}") from exc
-    except httpx.HTTPError as exc:
-        raise HTTPException(status_code=502, detail=f"upstream request failed: {exc}") from exc
-    raw_bytes = resp.content
+    if req.url.strip().lower() == "local://demo":
+        try:
+            raw_bytes = DEMO_PAYLOAD_PATH.read_bytes()
+        except OSError as exc:
+            raise HTTPException(status_code=500, detail="offline demo payload is unavailable") from exc
+        final_url = req.url
+        http_status = 200
+        content_type = "application/json"
+    else:
+        current_url = req.url
+        try:
+            for _ in range(11):
+                if not is_allowed_url(current_url):
+                    raise HTTPException(status_code=403, detail="redirect host is not allowed")
+                resp = httpx.get(
+                    current_url,
+                    headers={"User-Agent": USER_AGENT},
+                    timeout=30.0,
+                    follow_redirects=False,
+                )
+                if not resp.is_redirect:
+                    resp.raise_for_status()
+                    break
+                location = resp.headers.get("location")
+                if not location:
+                    raise HTTPException(status_code=502, detail="upstream redirect has no location")
+                current_url = str(resp.url.join(location))
+            else:
+                raise HTTPException(status_code=502, detail="too many upstream redirects")
+        except HTTPException:
+            raise
+        except httpx.UnsupportedProtocol as exc:
+            raise HTTPException(status_code=400, detail=f"URL scheme is not supported by extractor transport: {exc}") from exc
+        except httpx.HTTPError as exc:
+            raise HTTPException(status_code=502, detail=f"upstream request failed: {exc}") from exc
+        raw_bytes = resp.content
+        final_url = str(resp.url)
+        http_status = resp.status_code
+        content_type = resp.headers.get("content-type")
 
     ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%f")[:-3] + "Z"
     file_uuid = str(uuid.uuid4())
     slug = _safe_source_slug(req.source)
     filename = f"{slug}_{ts}_{file_uuid}.json"
+    manifest_filename = f"{slug}_{ts}_{file_uuid}.manifest.json"
 
     LANDING_DIR.mkdir(parents=True, exist_ok=True)
     dest = LANDING_DIR / filename
+    manifest_dest = LANDING_DIR / manifest_filename
 
     # Validate it's actually JSON before writing (payload must stay as
     # unmodified as possible, but we do want to fail fast on garbage).
@@ -89,9 +120,48 @@ def extract(req: ExtractRequest) -> ExtractResponse:
     except json.JSONDecodeError as exc:
         raise HTTPException(status_code=502, detail=f"upstream response is not valid JSON: {exc}") from exc
 
-    dest.write_bytes(raw_bytes)
+    fetched_at = datetime.now(timezone.utc).isoformat()
+    manifest = {
+        "manifest_version": 1,
+        "status": "extracted",
+        "source": req.source,
+        "run_id": req.run_id,
+        "requested_url": req.url,
+        "final_url": final_url,
+        "fetched_at": fetched_at,
+        "http_status": http_status,
+        "content_type": content_type,
+        "byte_size": len(raw_bytes),
+        "sha256": hashlib.sha256(raw_bytes).hexdigest(),
+        "payload_filename": filename,
+    }
 
-    return ExtractResponse(filename=filename, source=req.source, source_url=req.url)
+    _write_atomically(dest, raw_bytes)
+    _write_atomically(
+        manifest_dest,
+        json.dumps(manifest, ensure_ascii=True, indent=2).encode("utf-8") + b"\n",
+    )
+
+    return ExtractResponse(
+        filename=filename,
+        manifest_filename=manifest_filename,
+        source=req.source,
+        source_url=req.url,
+    )
+
+
+def _write_atomically(destination: Path, content: bytes) -> None:
+    """Make a completed file visible only after all bytes have been written."""
+    with tempfile.NamedTemporaryFile(dir=destination.parent, prefix=f".{destination.name}.", delete=False) as tmp:
+        temporary_path = Path(tmp.name)
+        tmp.write(content)
+        tmp.flush()
+        os.fsync(tmp.fileno())
+    try:
+        os.replace(temporary_path, destination)
+    except Exception:
+        temporary_path.unlink(missing_ok=True)
+        raise
 
 
 def _fetch_http_source(url: str) -> bytes:

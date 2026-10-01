@@ -219,7 +219,7 @@ services:
       - ./orchestrator/data:/data:z
       - ./extractor/conf/allowed_hosts:/config/allowed_hosts:ro,z
     ports:
-      - "${ORCHESTRATOR_PORT}:8000"
+      - "${ORCHESTRATOR_PORT}:8080"
     networks: [dw]
     depends_on:
       extractor:
@@ -231,7 +231,7 @@ services:
       mart:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://localhost:8000/health',timeout=5)"]
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://localhost:8080/health',timeout=10)"]
       interval: 5s
       timeout: 5s
       retries: 10
