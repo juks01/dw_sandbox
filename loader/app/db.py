@@ -51,20 +51,36 @@ def health_check() -> bool:
         return False
 
 
-def insert_raw_batch(cur: psycopg.Cursor, filename: str, source: str, source_url: Optional[str], payload: Any) -> Optional[int]:
-    """Insert into staging.raw_batches. Returns the new batch id, or None if
-    this filename was already loaded before (idempotency, spec section 16)."""
+def insert_raw_batch(
+    cur: psycopg.Cursor, filename: str, source: str, source_url: Optional[str],
+    payload: Any, load_mode: str, delete_policy: str, run_id: Optional[str],
+    checkpoint_before: Optional[str], checkpoint_after: Optional[str],
+    pagination_complete: bool,
+) -> tuple[int, bool, list[str]]:
+    """Return the batch ID, whether it is new, and table names for duplicates."""
     cur.execute(
         """
-        INSERT INTO staging.raw_batches (filename, source, source_url, payload)
-        VALUES (%s, %s, %s, %s)
+        INSERT INTO staging.raw_batches
+            (filename, source, source_url, payload, run_id, load_mode, delete_policy,
+             checkpoint_before, checkpoint_after, pagination_complete)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         ON CONFLICT (filename) DO NOTHING
         RETURNING id
         """,
-        (filename, source, source_url, Json(payload)),
+        (filename, source, source_url, Json(payload), run_id, load_mode, delete_policy,
+         checkpoint_before, checkpoint_after, pagination_complete),
     )
     row = cur.fetchone()
-    return row[0] if row else None
+    if row:
+        return row[0], True, []
+    cur.execute(
+        "SELECT id, table_names FROM staging.raw_batches WHERE filename = %s",
+        (filename,),
+    )
+    existing = cur.fetchone()
+    if not existing:
+        raise RuntimeError("batch insert conflicted but existing batch was not found")
+    return existing[0], False, existing[1] or []
 
 
 def _pg_type_for(value: Any) -> str:
@@ -160,17 +176,29 @@ def insert_rows(cur: psycopg.Cursor, table_name: str, rows: list[dict]) -> int:
     return count
 
 
-def load_payload(filename: str, source: str, source_url: Optional[str], payload: Any, flatten_fn) -> dict[str, Any]:
+def load_payload(
+    filename: str, source: str, source_url: Optional[str], payload: Any,
+    flatten_fn, load_mode: str, delete_policy: str, run_id: Optional[str],
+    checkpoint_before: Optional[str], checkpoint_after: Optional[str],
+    pagination_complete: bool,
+) -> dict[str, Any]:
     """flatten_fn(batch_id) -> {table_name: [row, ...]}. Flattening happens
     AFTER the batch id is known so every row can carry the real
     _source_batch_id, all inside the same transaction as the raw_batches
     insert (idempotency + consistency)."""
     with get_conn() as conn:
         with conn.cursor() as cur:
-            batch_id = insert_raw_batch(cur, filename, source, source_url, payload)
-            if batch_id is None:
-                conn.rollback()
-                return {"status": "skipped_duplicate", "filename": filename, "tables": {}}
+            batch_id, is_new, existing_tables = insert_raw_batch(
+                cur, filename, source, source_url, payload, load_mode, delete_policy, run_id,
+                checkpoint_before, checkpoint_after, pagination_complete,
+            )
+            if not is_new:
+                return {
+                    "status": "skipped_duplicate",
+                    "filename": filename,
+                    "batch_id": batch_id,
+                    "tables": {name: 0 for name in existing_tables},
+                }
 
             tables = flatten_fn(batch_id)
 
@@ -180,6 +208,10 @@ def load_payload(filename: str, source: str, source_url: Optional[str], payload:
                 ensure_columns(cur, table_name, rows)
                 inserted = insert_rows(cur, table_name, rows)
                 summary[table_name] = inserted
+            cur.execute(
+                "UPDATE staging.raw_batches SET table_names = %s WHERE id = %s",
+                (Json(list(tables)), batch_id),
+            )
 
         conn.commit()
     return {"status": "loaded", "filename": filename, "batch_id": batch_id, "tables": summary}

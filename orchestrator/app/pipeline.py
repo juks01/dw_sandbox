@@ -61,6 +61,20 @@ def check_loader() -> bool:
         return False
 
 
+def _http_error_message(service: str, response: httpx.Response) -> str:
+    detail = response.text.strip()
+    try:
+        payload = response.json()
+        if isinstance(payload, dict):
+            detail = str(payload.get("detail", detail))
+    except ValueError:
+        pass
+    status = f"HTTP {response.status_code}"
+    if response.reason_phrase:
+        status += f" {response.reason_phrase}"
+    return f"{service} returned {status}: {detail or 'no response body'}"
+
+
 def check_core() -> bool:
     return _pg_select_1(CORE_HOST, CORE_PORT, CORE_DB, CORE_SERVICE_USER, CORE_SERVICE_PASSWORD)
 
@@ -84,14 +98,21 @@ def full_health() -> dict[str, Any]:
     return {"status": "ok" if all(checks.values()) else "degraded", "dependencies": checks}
 
 
-def call_core_sync(loaded_table_names: set[str]) -> list[dict]:
+def call_core_sync(
+    batch_id: int, source_name: str, load_mode: str, delete_policy: str,
+    key_fields: list[str],
+    loaded_table_names: set[str],
+) -> list[dict]:
     with psycopg.connect(
         host=CORE_HOST, port=CORE_PORT, dbname=CORE_DB,
         user=CORE_SERVICE_USER, password=CORE_SERVICE_PASSWORD, connect_timeout=10,
     ) as conn:
         with conn.cursor() as cur:
-            cur.execute("SELECT * FROM core.sync_users()")
-            cur.execute("SELECT * FROM core.sync_from_staging()")
+            cur.execute("SELECT * FROM core.sync_users(%s, %s)", (load_mode, delete_policy))
+            cur.execute(
+                "SELECT * FROM core.sync_from_staging(%s, %s, %s, %s, %s)",
+                (batch_id, source_name, load_mode, delete_policy, key_fields),
+            )
             rows = cur.fetchall()
         conn.commit()
 
@@ -142,8 +163,18 @@ class PipelineError(Exception):
         self.message = message
 
 
-def run_pipeline_steps(source_name: str, source_url: str, run_id: int) -> None:
-    """Runs extract -> load while core and mart are disabled on this branch."""
+def run_pipeline_steps(source: dict, run_id: int, force_full: bool = False) -> None:
+    """Run one source through extract, load, core and mart."""
+    source_name = source["name"]
+    source_url = source["url"]
+    checkpoint_before = None if force_full else source.get("checkpoint")
+    load_mode = (
+        "full_snapshot"
+        if force_full or not checkpoint_before
+        else source["load_mode"]
+    )
+    key_fields = source.get("key_fields") or []
+    db.update_run(run_id, checkpoint_before=checkpoint_before, load_mode=load_mode)
 
     # Pre-flight dependency health checks: don't start against a known-down dependency.
     health = full_health()
@@ -156,25 +187,35 @@ def run_pipeline_steps(source_name: str, source_url: str, run_id: int) -> None:
     try:
         resp = httpx.post(
             f"{EXTRACTOR_URL}/extract",
-            json={"source": source_name, "url": source_url, "run_id": str(run_id)},
+            json={
+                "source": source_name,
+                "url": source_url,
+                "run_id": str(run_id),
+                "load_mode": load_mode,
+                "delete_policy": source["delete_policy"],
+                "checkpoint_before": checkpoint_before,
+                "incremental_param": source["incremental_param"],
+                "watermark_field": source["watermark_field"],
+                "watermark_required": source["load_mode"] == "incremental_upsert",
+            },
             timeout=60.0,
         )
         resp.raise_for_status()
         extract_result = resp.json()
     except httpx.HTTPStatusError as exc:
-        detail = exc.response.text.strip()
-        try:
-            payload = exc.response.json()
-            detail = str(payload.get("detail", detail))
-        except ValueError:
-            pass
-        raise PipelineError("extract", f"extractor returned HTTP {exc.response.status_code}: {detail}") from exc
+        raise PipelineError("extract", _http_error_message("extractor", exc.response)) from exc
     except httpx.RequestError as exc:
         raise PipelineError("extract", f"extractor request failed: {exc}") from exc
     except Exception as exc:
         raise PipelineError("extract", str(exc)) from exc
 
     filename = extract_result["filename"]
+    checkpoint_after = extract_result.get("checkpoint_after")
+    if not extract_result.get("pagination_complete", False):
+        raise PipelineError("extract", "source response is paginated; all pages must be fetched before loading")
+    if source["load_mode"] == "incremental_upsert" and not checkpoint_after:
+        raise PipelineError("extract", "incremental source did not produce a checkpoint")
+    db.update_run(run_id, checkpoint_after=checkpoint_after)
     db.update_run(run_id, filename=filename)
 
     # ---- load ----
@@ -182,23 +223,41 @@ def run_pipeline_steps(source_name: str, source_url: str, run_id: int) -> None:
     try:
         resp = httpx.post(
             f"{LOADER_URL}/load",
-            json={"filename": filename, "source": source_name, "source_url": extract_result.get("source_url")},
+            json={
+                "filename": filename,
+                "source": source_name,
+                "source_url": extract_result.get("source_url"),
+                "load_mode": load_mode,
+                "delete_policy": source["delete_policy"],
+                "run_id": str(run_id),
+                "checkpoint_before": checkpoint_before,
+                "checkpoint_after": checkpoint_after,
+                "pagination_complete": True,
+            },
             timeout=60.0,
         )
         resp.raise_for_status()
         load_result = resp.json()
+    except httpx.HTTPStatusError as exc:
+        raise PipelineError("load", _http_error_message("loader", exc.response)) from exc
     except Exception as exc:
         raise PipelineError("load", str(exc)) from exc
 
     if load_result.get("batch_id") is not None:
         db.update_run(run_id, batch_id=str(load_result["batch_id"]))
+    if not load_result.get("batch_id"):
+        raise PipelineError("load", "loader did not return a staging batch ID")
 
     loaded_table_names: set[str] = set(load_result.get("tables") or {})
 
     # ---- core ----
     db.update_run(run_id, step="core")
     try:
-        core_synced = call_core_sync(loaded_table_names)
+        core_synced = call_core_sync(
+            int(load_result["batch_id"]), source_name, load_mode,
+            source["delete_policy"], key_fields,
+            loaded_table_names,
+        )
     except PipelineError:
         raise
     except Exception as exc:
@@ -216,4 +275,6 @@ def run_pipeline_steps(source_name: str, source_url: str, run_id: int) -> None:
     except Exception as exc:
         raise PipelineError("mart", str(exc)) from exc
 
+    if checkpoint_after:
+        db.update_source_checkpoint(source_name, checkpoint_after)
     db.update_run(run_id, status="done", step="done", finished=db.now_iso())
