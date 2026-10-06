@@ -74,6 +74,24 @@
   .modal .checkbox-row { display: flex; align-items: center; gap: 8px; margin-top: 14px; }
   .modal .checkbox-row label { margin: 0; color: var(--text); font-size: 13px; }
   .modal .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px; }
+  .field-info {
+    display: inline-flex; position: relative; align-items: center; justify-content: center;
+    width: 15px; height: 15px; margin-left: 4px; border: 1px solid var(--muted);
+    border-radius: 50%; color: var(--muted); font-size: 10px; font-weight: 600;
+    cursor: help; vertical-align: middle;
+  }
+  .field-info::after {
+    content: attr(data-tooltip); position: absolute; left: 50%; bottom: calc(100% + 8px);
+    z-index: 60; width: 250px; padding: 8px 10px; border: 1px solid var(--border);
+    border-radius: 6px; background: #0b1222; color: var(--text); font-size: 12px;
+    font-weight: 400; line-height: 1.4; white-space: normal; text-align: left;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.3); opacity: 0; visibility: hidden;
+    transform: translate(-50%, 3px); transition: opacity 120ms ease, transform 120ms ease;
+    pointer-events: none;
+  }
+  .field-info:hover::after, .field-info:focus-visible::after {
+    opacity: 1; visibility: visible; transform: translate(-50%, 0);
+  }
   button.secondary { background: var(--border); }
 </style>
 </head>
@@ -141,11 +159,17 @@
         <option value="close_on_full_snapshot">Close only on full snapshots</option>
         <option value="never_close">Never close missing keys</option>
       </select>
-      <label for="add-key-fields">Key fields (comma-separated, optional)</label>
+      <label for="add-key-fields">Key fields (comma-separated, optional)
+        <span class="field-info" tabindex="0" role="img" aria-label="Key fields help" data-tooltip="Business key column(s) in the returned records, for example id. This is not the name of an API query parameter. Leave blank to use id automatically when present.">i</span>
+      </label>
       <input type="text" id="add-key-fields" placeholder="e.g. id">
-      <label for="add-incremental-param">Incremental query parameter</label>
+      <label for="add-incremental-param">Incremental query parameter
+        <span class="field-info" tabindex="0" role="img" aria-label="Incremental query parameter help" data-tooltip="Name of the URL query parameter the API accepts to return records changed since a timestamp. Common default: updated_since. The API must support this filter.">i</span>
+      </label>
       <input type="text" id="add-incremental-param" value="updated_since">
-      <label for="add-watermark-field">Watermark field (ISO timestamp)</label>
+      <label for="add-watermark-field">Watermark field (ISO timestamp)
+        <span class="field-info" tabindex="0" role="img" aria-label="Watermark field help" data-tooltip="JSON field containing each record's last-updated timestamp, for example updated_at or updatedAt. The extractor uses its latest value as the next checkpoint.">i</span>
+      </label>
       <input type="text" id="add-watermark-field" value="updated_at">
       <div class="checkbox-row">
         <input type="checkbox" id="add-enabled" checked>

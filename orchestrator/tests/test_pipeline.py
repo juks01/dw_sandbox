@@ -97,5 +97,54 @@ class PipelineCheckpointTests(unittest.TestCase):
         )
 
 
+class HealthCheckLoggingTests(unittest.TestCase):
+    def setUp(self):
+        with pipeline._health_log_lock:
+            pipeline._health_log_states.clear()
+
+    def tearDown(self):
+        with pipeline._health_log_lock:
+            pipeline._health_log_states.clear()
+
+    def test_http_failure_log_identifies_service_and_target_once_until_recovery(self):
+        response = httpx.Response(503, request=httpx.Request("GET", "http://extractor:8000/health"))
+        with (
+            patch.object(pipeline.httpx, "get", return_value=response),
+            self.assertLogs("dw.health", level="WARNING") as captured,
+        ):
+            self.assertFalse(pipeline.check_extractor())
+            self.assertFalse(pipeline.check_extractor())
+
+        self.assertEqual(len(captured.records), 1)
+        self.assertIn("extractor", captured.output[0])
+        self.assertIn("http://extractor:8000/health", captured.output[0])
+        self.assertIn("HTTP 503", captured.output[0])
+
+        with (
+            patch.object(
+                pipeline.httpx,
+                "get",
+                return_value=httpx.Response(
+                    200, request=httpx.Request("GET", "http://extractor:8000/health"),
+                ),
+            ),
+            self.assertLogs("dw.health", level="INFO") as captured,
+        ):
+            self.assertTrue(pipeline.check_extractor())
+
+        self.assertIn("Health check recovered for extractor", captured.output[0])
+
+    def test_database_failure_log_identifies_target_database(self):
+        with (
+            patch.object(pipeline.psycopg, "connect", side_effect=RuntimeError("connection refused")),
+            self.assertLogs("dw.health", level="WARNING") as captured,
+        ):
+            self.assertFalse(pipeline.check_staging())
+
+        self.assertIn("staging", captured.output[0])
+        self.assertIn("staging:5432/staging", captured.output[0])
+        self.assertIn("connection refused", captured.output[0])
+
+
 if __name__ == "__main__":
     unittest.main()

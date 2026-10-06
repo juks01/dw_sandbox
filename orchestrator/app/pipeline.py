@@ -1,12 +1,18 @@
 from __future__ import annotations
 
+import logging
 import os
+import threading
 from typing import Any
 
 import httpx
 import psycopg
 
 from . import db
+
+logger = logging.getLogger("dw.health")
+_health_log_lock = threading.Lock()
+_health_log_states: dict[str, bool] = {}
 
 EXTRACTOR_URL = os.environ.get("EXTRACTOR_URL", "http://extractor:8000")
 LOADER_URL = os.environ.get("LOADER_URL", "http://loader:8000")
@@ -32,7 +38,19 @@ MART_SERVICE_USER = os.environ.get("MART_SERVICE_USER", "mart_service")
 MART_SERVICE_PASSWORD = os.environ.get("MART_SERVICE_PASSWORD", "")
 
 
-def _pg_select_1(host: str, port: int, dbname: str, user: str, password: str) -> bool:
+def _log_health_result(name: str, target: str, healthy: bool, detail: str = "") -> None:
+    with _health_log_lock:
+        previous = _health_log_states.get(name)
+        _health_log_states[name] = healthy
+
+    if not healthy and previous is not False:
+        logger.warning("Health check failed for %s (%s): %s", name, target, detail)
+    elif healthy and previous is False:
+        logger.info("Health check recovered for %s (%s)", name, target)
+
+
+def _pg_select_1(name: str, host: str, port: int, dbname: str, user: str, password: str) -> bool:
+    target = f"{host}:{port}/{dbname}"
     try:
         with psycopg.connect(
             host=host, port=port, dbname=dbname, user=user, password=password, connect_timeout=3
@@ -40,25 +58,32 @@ def _pg_select_1(host: str, port: int, dbname: str, user: str, password: str) ->
             with conn.cursor() as cur:
                 cur.execute("SELECT 1")
                 cur.fetchone()
-        return True
-    except Exception:
+    except Exception as exc:
+        _log_health_result(name, target, False, str(exc))
         return False
+    _log_health_result(name, target, True)
+    return True
+
+
+def _check_http_service(name: str, url: str) -> bool:
+    try:
+        response = httpx.get(url, timeout=3.0)
+        if response.status_code != 200:
+            _log_health_result(name, url, False, f"HTTP {response.status_code}")
+            return False
+    except httpx.HTTPError as exc:
+        _log_health_result(name, url, False, str(exc))
+        return False
+    _log_health_result(name, url, True)
+    return True
 
 
 def check_extractor() -> bool:
-    try:
-        r = httpx.get(f"{EXTRACTOR_URL}/health", timeout=3.0)
-        return r.status_code == 200
-    except Exception:
-        return False
+    return _check_http_service("extractor", f"{EXTRACTOR_URL}/health")
 
 
 def check_loader() -> bool:
-    try:
-        r = httpx.get(f"{LOADER_URL}/health", timeout=3.0)
-        return r.status_code == 200
-    except Exception:
-        return False
+    return _check_http_service("loader", f"{LOADER_URL}/health")
 
 
 def _http_error_message(service: str, response: httpx.Response) -> str:
@@ -76,15 +101,22 @@ def _http_error_message(service: str, response: httpx.Response) -> str:
 
 
 def check_core() -> bool:
-    return _pg_select_1(CORE_HOST, CORE_PORT, CORE_DB, CORE_SERVICE_USER, CORE_SERVICE_PASSWORD)
+    return _pg_select_1(
+        "core", CORE_HOST, CORE_PORT, CORE_DB, CORE_SERVICE_USER, CORE_SERVICE_PASSWORD,
+    )
 
 
 def check_staging() -> bool:
-    return _pg_select_1(STAGING_HOST, STAGING_PORT, STAGING_DB, STAGING_READER_USER, STAGING_READER_PASSWORD)
+    return _pg_select_1(
+        "staging", STAGING_HOST, STAGING_PORT, STAGING_DB,
+        STAGING_READER_USER, STAGING_READER_PASSWORD,
+    )
 
 
 def check_mart() -> bool:
-    return _pg_select_1(MART_HOST, MART_PORT, MART_DB, MART_SERVICE_USER, MART_SERVICE_PASSWORD)
+    return _pg_select_1(
+        "mart", MART_HOST, MART_PORT, MART_DB, MART_SERVICE_USER, MART_SERVICE_PASSWORD,
+    )
 
 
 def full_health() -> dict[str, Any]:
