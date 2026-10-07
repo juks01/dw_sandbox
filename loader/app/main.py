@@ -4,6 +4,8 @@ import functools
 import hashlib
 import json
 import os
+from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Literal, Optional
 
@@ -16,12 +18,14 @@ from .flatten import flatten_payload
 
 LANDING_DIR = Path(os.environ.get("LANDING_DIR", "/landing"))
 
-app = FastAPI(title="dw-dev loader")
 
-
-@app.on_event("startup")
-async def configure_access_logging() -> None:
+@asynccontextmanager
+async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
     install_health_access_log_filter()
+    yield
+
+
+app = FastAPI(title="dw-dev loader", lifespan=lifespan)
 
 
 class LoadRequest(BaseModel):

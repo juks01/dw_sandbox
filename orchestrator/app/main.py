@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import os
+from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Literal
 from urllib.parse import urlsplit
@@ -14,21 +16,21 @@ from . import db, pipeline, runner, scheduler
 from .access_log import install_health_access_log_filter
 from .auth import require_auth
 
-app = FastAPI(title="dw-dev orchestrator")
-
 STATIC_DIR = Path(__file__).parent / "static"
 
 
-@app.on_event("startup")
-async def on_startup() -> None:
+@asynccontextmanager
+async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
     install_health_access_log_filter()
     db.init_db()
     scheduler.start()
+    try:
+        yield
+    finally:
+        scheduler.stop()
 
 
-@app.on_event("shutdown")
-async def on_shutdown() -> None:
-    scheduler.stop()
+app = FastAPI(title="dw-dev orchestrator", lifespan=lifespan)
 
 
 # ---------------------------------------------------------------------
