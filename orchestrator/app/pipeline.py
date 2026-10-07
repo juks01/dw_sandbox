@@ -21,8 +21,6 @@ LOADER_URL = os.environ.get("LOADER_URL", "http://loader:8000")
 STAGING_HOST = os.environ.get("STAGING_HOST", "staging")
 STAGING_PORT = 5432 #int(os.environ.get("STAGING_PORT", "5432"))
 STAGING_DB = os.environ.get("STAGING_DB", "staging")
-STAGING_SERVICE_USER = os.environ.get("STAGING_SERVICE_USER", "staging_service")
-STAGING_SERVICE_PASSWORD = os.environ.get("STAGING_SERVICE_PASSWORD", "")
 STAGING_READER_USER = os.environ.get("STAGING_READER_USER", "staging_reader")
 STAGING_READER_PASSWORD = os.environ.get("STAGING_READER_PASSWORD", "")
 

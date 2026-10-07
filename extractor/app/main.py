@@ -5,7 +5,6 @@ the landing zone. It has no database dependency.
 """
 from __future__ import annotations
 
-import copy
 import hashlib
 import json
 import os
@@ -225,8 +224,6 @@ def _get_http_page(url: str) -> httpx.Response:
                 raise HTTPException(status_code=502, detail="upstream redirect has no location")
             current_url = str(response.url.join(location))
         raise HTTPException(status_code=502, detail="too many upstream redirects")
-    except HTTPException:
-        raise
     except httpx.UnsupportedProtocol as exc:
         raise HTTPException(status_code=400, detail=f"URL scheme is not supported by extractor transport: {exc}") from exc
     except httpx.HTTPError as exc:
@@ -306,11 +303,11 @@ def extract(req: ExtractRequest) -> ExtractResponse:
             resp = _get_http_page(current_url)
             try:
                 page_payload = resp.json()
-            except (ValueError, json.JSONDecodeError) as exc:
+            except ValueError as exc:
                 raise HTTPException(status_code=502, detail="upstream response is not valid JSON") from exc
 
             if aggregate is None:
-                aggregate = copy.deepcopy(page_payload)
+                aggregate = page_payload
             else:
                 # Keep paginated rows together so downstream stages see one complete source batch.
                 aggregate = _merge_page_payload(aggregate, page_payload)

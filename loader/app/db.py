@@ -154,13 +154,7 @@ def ensure_columns(cur: psycopg.Cursor, table_name: str, rows: list[dict]) -> No
 def insert_rows(cur: psycopg.Cursor, table_name: str, rows: list[dict]) -> int:
     if not rows:
         return 0
-    all_cols: list[str] = []
-    seen_cols = set()
-    for row in rows:
-        for c in row.keys():
-            if c not in seen_cols:
-                seen_cols.add(c)
-                all_cols.append(c)
+    all_cols = list(dict.fromkeys(col for row in rows for col in row))
 
     col_idents = sql.SQL(", ").join(sql.Identifier(c) for c in all_cols)
     placeholders = sql.SQL(", ").join(sql.Placeholder() for _ in all_cols)
@@ -168,12 +162,9 @@ def insert_rows(cur: psycopg.Cursor, table_name: str, rows: list[dict]) -> int:
         "INSERT INTO staging.{tbl} ({cols}) VALUES ({vals}) ON CONFLICT (_row_id) DO NOTHING"
     ).format(tbl=sql.Identifier(table_name), cols=col_idents, vals=placeholders)
 
-    count = 0
     for row in rows:
-        values = [row.get(c) for c in all_cols]
-        cur.execute(insert_sql, values)
-        count += 1
-    return count
+        cur.execute(insert_sql, [row.get(col) for col in all_cols])
+    return len(rows)
 
 
 def load_payload(

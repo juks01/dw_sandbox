@@ -69,8 +69,8 @@ def load(req: LoadRequest) -> dict:
         raise HTTPException(status_code=409, detail=f"landing manifest not found: {manifest_filename}")
 
     try:
-        raw_text = file_path.read_text(encoding="utf-8")
-        payload = json.loads(raw_text)
+        raw_bytes = file_path.read_bytes()
+        payload = json.loads(raw_bytes.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise HTTPException(status_code=400, detail=f"invalid JSON in {req.filename}: {exc}") from exc
 
@@ -98,7 +98,7 @@ def load(req: LoadRequest) -> dict:
         if requested != manifested:
             raise HTTPException(status_code=409, detail=f"{field} does not match extraction manifest")
     expected_sha256 = manifest.get("sha256")
-    actual_sha256 = hashlib.sha256(file_path.read_bytes()).hexdigest()
+    actual_sha256 = hashlib.sha256(raw_bytes).hexdigest()
     # Reject altered or mismatched landing files before any staging writes occur.
     if expected_sha256 != actual_sha256:
         raise HTTPException(status_code=409, detail="landing payload checksum does not match manifest")
