@@ -4,9 +4,14 @@
 -- core_service (used by the orchestrator) and the schema owner (admin).
 
 -- =======================================================================
--- core.sync_users(): users_ext.department / users_ext.end_user -> dims
+-- core.sync_users(mode): users_ext.department / users_ext.end_user -> dims
 -- =======================================================================
-CREATE OR REPLACE FUNCTION core.sync_users()
+DROP FUNCTION IF EXISTS core.sync_users();
+DROP FUNCTION IF EXISTS core.sync_users(text);
+CREATE OR REPLACE FUNCTION core.sync_users(
+    p_load_mode text DEFAULT 'full_snapshot',
+    p_delete_policy text DEFAULT 'close_on_full_snapshot'
+)
 RETURNS TABLE(entity text, upserted_count bigint, closed_count bigint)
 LANGUAGE plpgsql
 SECURITY DEFINER
@@ -21,6 +26,13 @@ DECLARE
     v_user_closed bigint := 0;
     v_rowcount bigint;
 BEGIN
+    IF p_load_mode IS NULL OR p_load_mode NOT IN ('full_snapshot', 'incremental_upsert') THEN
+        RAISE EXCEPTION 'unsupported load mode: %', p_load_mode;
+    END IF;
+    IF p_delete_policy IS NULL OR p_delete_policy NOT IN ('close_on_full_snapshot', 'never_close') THEN
+        RAISE EXCEPTION 'unsupported delete policy: %', p_delete_policy;
+    END IF;
+
     EXECUTE 'DROP SCHEMA IF EXISTS users_ext CASCADE';
     EXECUTE 'CREATE SCHEMA users_ext';
     EXECUTE 'IMPORT FOREIGN SCHEMA users FROM SERVER users_srv INTO users_ext';
@@ -30,7 +42,8 @@ BEGIN
     -- ---- departments ----
     UPDATE core.dim_department d
     SET valid_to = now(), is_current = false
-    WHERE d.is_current
+    WHERE p_load_mode = 'full_snapshot'
+      AND p_delete_policy = 'close_on_full_snapshot' AND d.is_current
       AND NOT EXISTS (SELECT 1 FROM users_ext.department s WHERE s.department_id = d.department_id);
     GET DIAGNOSTICS v_rowcount = ROW_COUNT;
     v_dept_closed := v_dept_closed + v_rowcount;
@@ -67,7 +80,8 @@ BEGIN
     -- ---- end users ----
     UPDATE core.dim_user d
     SET valid_to = now(), is_current = false
-    WHERE d.is_current
+    WHERE p_load_mode = 'full_snapshot'
+      AND p_delete_policy = 'close_on_full_snapshot' AND d.is_current
       AND NOT EXISTS (SELECT 1 FROM users_ext.end_user s WHERE s.user_id = d.user_id);
     GET DIAGNOSTICS v_rowcount = ROW_COUNT;
     v_user_closed := v_user_closed + v_rowcount;
@@ -100,15 +114,13 @@ BEGIN
 END;
 $fn$;
 
-REVOKE ALL ON FUNCTION core.sync_users() FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION core.sync_users() TO core_service;
+REVOKE ALL ON FUNCTION core.sync_users(text, text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION core.sync_users(text, text) TO core_service;
 
 -- =======================================================================
--- core.sync_from_staging(): generic staging.<table> -> core.dim_<table>
--- Business key: the "id" column when present, otherwise an md5 hash of
--- every source column. Content hash: md5 of every source column (this is
--- what drives change detection; technical/SCD columns are never hashed).
--- Deletion policy: identical to sync_users() above -- close, don't reinsert.
+-- core.sync_from_staging(): one explicit staging batch -> core.dim_<table>
+-- Business key: configured keys when present on a table, otherwise "id" when present.
+-- Content hashes detect changes but are not used as business keys. Full snapshots close missing keys.
 -- Identifiers are only ever built with format(%I/%L) from information_schema,
 -- never from raw user/source input, and are additionally normalized.
 --
@@ -117,7 +129,12 @@ GRANT EXECUTE ON FUNCTION core.sync_users() TO core_service;
 -- so a table that silently fails to make it into core turns into a real
 -- pipeline error instead of a quiet no-op.
 -- =======================================================================
-CREATE OR REPLACE FUNCTION core.sync_from_staging()
+DROP FUNCTION IF EXISTS core.sync_from_staging();
+DROP FUNCTION IF EXISTS core.sync_from_staging(bigint, text, text, text[]);
+CREATE OR REPLACE FUNCTION core.sync_from_staging(
+    p_batch_id bigint, p_source text, p_load_mode text, p_delete_policy text,
+    p_key_fields text[]
+)
 RETURNS TABLE(source_table text, dim_table text, inserted_count bigint, closed_count bigint)
 LANGUAGE plpgsql
 SECURITY DEFINER
@@ -128,25 +145,72 @@ DECLARE
     col RECORD;
     dim_name TEXT;
     col_list TEXT;
+    data_col_list TEXT;
     bk_expr TEXT;
     hash_expr TEXT;
     has_id BOOLEAN;
     sql TEXT;
-    v_closed1 bigint;
-    v_closed2 bigint;
-    v_inserted bigint;
+    v_batch_source TEXT;
+    v_batch_mode TEXT;
+    v_batch_delete_policy TEXT;
+    v_pagination_complete BOOLEAN;
+    v_batch_tables TEXT[];
+    v_in_batch BOOLEAN;
+    v_key_count INTEGER;
+    normalized_keys TEXT[];
+    v_key_fields_found BOOLEAN := false;
+    v_has_batch_rows BOOLEAN := false;
+    root_table TEXT;
+    v_closed1 bigint := 0;
+    v_closed2 bigint := 0;
+    v_inserted bigint := 0;
 BEGIN
+    IF p_load_mode IS NULL OR p_load_mode NOT IN ('full_snapshot', 'incremental_upsert') THEN
+        RAISE EXCEPTION 'unsupported load mode: %', p_load_mode;
+    END IF;
+    IF p_delete_policy IS NULL OR p_delete_policy NOT IN ('close_on_full_snapshot', 'never_close') THEN
+        RAISE EXCEPTION 'unsupported delete policy: %', p_delete_policy;
+    END IF;
+
+    root_table := regexp_replace(lower(p_source), '[^a-z0-9_]', '_', 'g');
+    root_table := regexp_replace(root_table, '_+', '_', 'g');
+    root_table := trim(both '_' from root_table);
+    IF root_table = '' THEN
+        root_table := 'col';
+    END IF;
+    IF root_table ~ '^[0-9]' THEN
+        root_table := 'c_' || root_table;
+    END IF;
+    root_table := left(root_table, 63);
+
     EXECUTE 'DROP SCHEMA IF EXISTS staging_ext CASCADE';
     EXECUTE 'CREATE SCHEMA staging_ext';
     EXECUTE 'IMPORT FOREIGN SCHEMA staging FROM SERVER staging_srv INTO staging_ext';
     EXECUTE 'GRANT ALL PRIVILEGES ON SCHEMA staging_ext TO core_service';
     EXECUTE 'GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA staging_ext TO core_service';
 
+    SELECT b.source, b.load_mode, b.delete_policy, b.pagination_complete,
+           ARRAY(SELECT jsonb_array_elements_text(b.table_names))
+    INTO v_batch_source, v_batch_mode, v_batch_delete_policy, v_pagination_complete, v_batch_tables
+    FROM staging_ext.raw_batches b
+    WHERE b.id = p_batch_id;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'staging batch % does not exist', p_batch_id;
+    END IF;
+    IF v_batch_source IS DISTINCT FROM p_source OR v_batch_mode IS DISTINCT FROM p_load_mode
+       OR v_batch_delete_policy IS DISTINCT FROM p_delete_policy THEN
+        RAISE EXCEPTION 'staging batch % source/mode metadata does not match request', p_batch_id;
+    END IF;
+    IF NOT v_pagination_complete THEN
+        RAISE EXCEPTION 'staging batch % is incomplete; refusing core synchronization', p_batch_id;
+    END IF;
+
     FOR tbl IN
         SELECT table_name
         FROM information_schema.tables
         WHERE table_schema = 'staging_ext'
           AND table_name <> 'raw_batches'
+          AND (table_name = ANY(v_batch_tables) OR table_name = root_table)
         ORDER BY table_name
     LOOP
         dim_name := 'dim_' || regexp_replace(lower(tbl.table_name), '[^a-z0-9_]', '_', 'g');
@@ -156,6 +220,11 @@ BEGIN
             dim_name := 't_' || dim_name;
         END IF;
 
+        EXECUTE format(
+            'SELECT EXISTS (SELECT 1 FROM staging_ext.%I WHERE _source_batch_id = $1)',
+            tbl.table_name
+        ) INTO v_in_batch USING p_batch_id;
+        v_has_batch_rows := v_has_batch_rows OR v_in_batch;
         IF NOT EXISTS (
             SELECT 1 FROM information_schema.tables
             WHERE table_schema = 'core' AND table_name = dim_name
@@ -190,47 +259,137 @@ BEGIN
         FROM information_schema.columns
         WHERE table_schema = 'staging_ext' AND table_name = tbl.table_name;
 
+        SELECT COALESCE(
+            string_agg(format('s.%I', column_name), ', ' ORDER BY ordinal_position),
+            'NULL::text'
+        )
+        INTO data_col_list
+        FROM information_schema.columns
+        WHERE table_schema = 'staging_ext'
+          AND table_name = tbl.table_name
+          AND column_name NOT IN ('_row_id', '_source_batch_id', '_parent_id', '_row_index');
+
         SELECT EXISTS (
             SELECT 1 FROM information_schema.columns
             WHERE table_schema = 'staging_ext' AND table_name = tbl.table_name AND column_name = 'id'
         ) INTO has_id;
+        hash_expr := format('md5(COALESCE((%s)::text, ''''))', data_col_list);
+        normalized_keys := ARRAY(
+            SELECT left(
+                CASE WHEN normalized = '' THEN 'col'
+                     WHEN normalized ~ '^[0-9]' THEN 'c_' || normalized
+                     ELSE normalized END,
+                63
+            )
+            FROM (
+                SELECT regexp_replace(
+                    trim(both '_' from regexp_replace(
+                        lower(key_field), '[^a-z0-9_]', '_', 'g'
+                    )),
+                    '_+', '_', 'g'
+                ) AS normalized
+                FROM unnest(COALESCE(p_key_fields, ARRAY[]::text[]))
+                     WITH ORDINALITY AS keys(key_field, ord)
+                ORDER BY ord
+            ) normalized_fields
+        );
+        v_key_count := cardinality(normalized_keys);
+        IF v_key_count > 0 THEN
+            SELECT count(*) INTO v_key_count
+            FROM information_schema.columns
+            WHERE table_schema = 'staging_ext'
+              AND table_name = tbl.table_name
+              AND column_name = ANY(normalized_keys);
+            IF v_key_count = cardinality(normalized_keys) THEN
+                v_key_fields_found := true;
+                IF cardinality(normalized_keys) = 1 THEN
+                    bk_expr := format('s.%I::text', normalized_keys[1]);
+                ELSE
+                    SELECT string_agg(format('s.%I', key_field), ', ' ORDER BY ord)
+                    INTO col_list
+                    FROM unnest(normalized_keys) WITH ORDINALITY AS keys(key_field, ord);
+                    bk_expr := format('row(%s)::text', col_list);
+                END IF;
+            ELSIF NOT v_in_batch THEN
+                bk_expr := 'NULL::text';
+            ELSIF has_id THEN
+                bk_expr := 's.id::text';
+            ELSE
+                RAISE EXCEPTION
+                    'configured key field(s) are missing from source batch % for table %; no id column is available',
+                    p_batch_id, tbl.table_name;
+            END IF;
+        ELSIF has_id THEN
+            bk_expr := 's.id::text';
+        ELSIF NOT v_in_batch THEN
+            bk_expr := 'NULL::text';
+        ELSE
+            RAISE EXCEPTION
+                'source table % has no stable business key; configure key fields or provide an id column',
+                tbl.table_name;
+        END IF;
 
-        hash_expr := format('md5((%s)::text)', col_list);
-        bk_expr := CASE WHEN has_id THEN 'id::text' ELSE hash_expr END;
+        SELECT string_agg(format('%I', column_name), ', ' ORDER BY ordinal_position)
+        INTO col_list
+        FROM information_schema.columns
+        WHERE table_schema = 'staging_ext' AND table_name = tbl.table_name;
 
         -- 1) close current dim rows whose content changed in the source
         sql := format(
-            'UPDATE core.%I d SET valid_to = now(), is_current = false
-             WHERE d.is_current AND EXISTS (
-               SELECT 1 FROM staging_ext.%I s
-               WHERE (%s) = d._business_key AND (%s) <> d._content_hash
-             )',
-            dim_name, tbl.table_name, bk_expr, hash_expr
+            'WITH latest AS (
+                    SELECT DISTINCT ON ((%s)) *
+                    FROM staging_ext.%I s
+                    WHERE s._source_batch_id = %L
+                    ORDER BY (%s), s._row_index DESC, s._row_id DESC
+                )
+                UPDATE core.%I d SET valid_to = now(), is_current = false
+                WHERE d.is_current AND EXISTS (
+                    SELECT 1 FROM latest s
+                    WHERE (%s) = d._business_key
+                        AND (%s) IS DISTINCT FROM d._content_hash
+                )',
+            bk_expr, tbl.table_name, p_batch_id, bk_expr, dim_name, bk_expr, hash_expr
         );
         EXECUTE sql;
         GET DIAGNOSTICS v_closed1 = ROW_COUNT;
 
         -- 2) close current dim rows whose business key disappeared from the source
-        sql := format(
-            'UPDATE core.%I d SET valid_to = now(), is_current = false
-             WHERE d.is_current AND NOT EXISTS (
-               SELECT 1 FROM staging_ext.%I s WHERE (%s) = d._business_key
-             )',
-            dim_name, tbl.table_name, bk_expr
-        );
-        EXECUTE sql;
-        GET DIAGNOSTICS v_closed2 = ROW_COUNT;
+        IF p_delete_policy = 'close_on_full_snapshot'
+           AND p_load_mode = 'full_snapshot' THEN
+            sql := format(
+                'WITH latest AS (
+                    SELECT DISTINCT ON ((%s)) *
+                    FROM staging_ext.%I s
+                    WHERE s._source_batch_id = %L
+                    ORDER BY (%s), s._row_index DESC, s._row_id DESC
+                )
+                UPDATE core.%I d SET valid_to = now(), is_current = false
+                WHERE d.is_current AND NOT EXISTS (
+                    SELECT 1 FROM latest s WHERE (%s) = d._business_key
+                )',
+                bk_expr, tbl.table_name, p_batch_id, bk_expr, dim_name, bk_expr
+            );
+            EXECUTE sql;
+            GET DIAGNOSTICS v_closed2 = ROW_COUNT;
+        END IF;
 
         -- 3) insert current versions for anything not already current
         --    (covers brand-new business keys and rows just closed in step 1)
         sql := format(
-            'INSERT INTO core.%I (%s, _business_key, valid_from, valid_to, is_current, _content_hash)
-             SELECT %s, (%s), now(), NULL, true, (%s)
-             FROM staging_ext.%I s
-             WHERE NOT EXISTS (
-               SELECT 1 FROM core.%I d WHERE d.is_current AND d._business_key = (%s)
-             )',
-            dim_name, col_list, col_list, bk_expr, hash_expr, tbl.table_name, dim_name, bk_expr
+            'WITH latest AS (
+                    SELECT DISTINCT ON ((%s)) *
+                    FROM staging_ext.%I s
+                    WHERE s._source_batch_id = %L
+                    ORDER BY (%s), s._row_index DESC, s._row_id DESC
+                )
+                INSERT INTO core.%I (%s, _business_key, valid_from, valid_to, is_current, _content_hash)
+                SELECT %s, (%s), now(), NULL, true, (%s)
+                FROM latest s
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM core.%I d WHERE d.is_current AND d._business_key = (%s)
+                )',
+            bk_expr, tbl.table_name, p_batch_id, bk_expr, dim_name, col_list, col_list,
+            bk_expr, hash_expr, dim_name, bk_expr
         );
         EXECUTE sql;
         GET DIAGNOSTICS v_inserted = ROW_COUNT;
@@ -241,8 +400,11 @@ BEGIN
         closed_count := v_closed1 + v_closed2;
         RETURN NEXT;
     END LOOP;
+    IF cardinality(normalized_keys) > 0 AND v_has_batch_rows AND NOT v_key_fields_found THEN
+        RAISE EXCEPTION 'configured key field(s) are missing from source batch %', p_batch_id;
+    END IF;
 END;
 $fn$;
 
-REVOKE ALL ON FUNCTION core.sync_from_staging() FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION core.sync_from_staging() TO core_service;
+REVOKE ALL ON FUNCTION core.sync_from_staging(bigint, text, text, text, text[]) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION core.sync_from_staging(bigint, text, text, text, text[]) TO core_service;

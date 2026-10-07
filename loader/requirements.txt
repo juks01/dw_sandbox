@@ -1,4 +1,4 @@
 fastapi==0.115.4
 uvicorn[standard]==0.32.0
-psycopg[binary]==3.2.3
-pydantic==2.9.2
+psycopg[binary]==3.3.6
+pydantic==2.13.5

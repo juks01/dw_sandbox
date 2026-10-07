@@ -10,8 +10,23 @@ CREATE TABLE IF NOT EXISTS staging.raw_batches (
     filename        TEXT NOT NULL UNIQUE,
     source          TEXT NOT NULL,
     source_url      TEXT,
-    payload         JSONB NOT NULL
+    payload         JSONB NOT NULL,
+    run_id          TEXT,
+    load_mode       TEXT NOT NULL DEFAULT 'full_snapshot',
+    delete_policy   TEXT NOT NULL DEFAULT 'close_on_full_snapshot',
+    checkpoint_before TEXT,
+    checkpoint_after TEXT,
+    pagination_complete BOOLEAN NOT NULL DEFAULT true,
+    table_names JSONB NOT NULL DEFAULT '[]'::jsonb
 );
+
+ALTER TABLE staging.raw_batches ADD COLUMN IF NOT EXISTS run_id TEXT;
+ALTER TABLE staging.raw_batches ADD COLUMN IF NOT EXISTS load_mode TEXT NOT NULL DEFAULT 'full_snapshot';
+ALTER TABLE staging.raw_batches ADD COLUMN IF NOT EXISTS delete_policy TEXT NOT NULL DEFAULT 'close_on_full_snapshot';
+ALTER TABLE staging.raw_batches ADD COLUMN IF NOT EXISTS checkpoint_before TEXT;
+ALTER TABLE staging.raw_batches ADD COLUMN IF NOT EXISTS checkpoint_after TEXT;
+ALTER TABLE staging.raw_batches ADD COLUMN IF NOT EXISTS pagination_complete BOOLEAN NOT NULL DEFAULT true;
+ALTER TABLE staging.raw_batches ADD COLUMN IF NOT EXISTS table_names JSONB NOT NULL DEFAULT '[]'::jsonb;
 
 CREATE INDEX IF NOT EXISTS idx_raw_batches_source ON staging.raw_batches (source);
 CREATE INDEX IF NOT EXISTS idx_raw_batches_payload_gin ON staging.raw_batches USING GIN (payload);

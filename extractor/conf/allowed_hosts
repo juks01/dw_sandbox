@@ -1,0 +1,5 @@
+# Allowed extractor hosts. One host per line.
+local://demo
+dummyjson.com
+*.dummyjson.com
+dummy-json.mock.beeceptor.com

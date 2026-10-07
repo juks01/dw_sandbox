@@ -64,6 +64,7 @@ def _flatten_object(
                 walk(value, col)
             elif isinstance(value, list):
                 child_table = normalize_identifier(f"{table_name}_{col}")
+                tables.setdefault(child_table, [])
                 for idx, item in enumerate(value):
                     if isinstance(item, dict):
                         _flatten_object(child_table, item, source_batch_id, row_id, idx, tables)
@@ -99,4 +100,5 @@ def flatten_payload(source: str, payload: Any, source_batch_id: int) -> dict[str
         row["value"] = payload
         tables.setdefault(table_name, []).append(row)
 
+    tables.setdefault(table_name, [])
     return tables

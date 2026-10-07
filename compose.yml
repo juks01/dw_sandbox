@@ -14,7 +14,7 @@ services:
   # PostgreSQL databases
   # ---------------------------------------------------------------------
   staging:
-    image: docker.io/library/postgres:16-bookworm
+    image: docker.io/library/postgres:17
     container_name: dw-staging
     hostname: staging
     environment:
@@ -42,7 +42,7 @@ services:
       retries: 10
 
   users:
-    image: docker.io/library/postgres:16-bookworm
+    image: docker.io/library/postgres:17
     container_name: dw-users
     hostname: users
     environment:
@@ -68,7 +68,7 @@ services:
       retries: 10
 
   core:
-    image: docker.io/library/postgres:16-bookworm
+    image: docker.io/library/postgres:17
     container_name: dw-core
     hostname: core
     environment:
@@ -107,7 +107,7 @@ services:
       retries: 10
 
   mart:
-    image: docker.io/library/postgres:16-bookworm
+    image: docker.io/library/postgres:17
     container_name: dw-mart
     hostname: mart
     environment:
@@ -196,6 +196,7 @@ services:
       ORCH_USER: ${ORCH_USER}
       ORCH_PASSWORD: ${ORCH_PASSWORD}
       ORCH_SQLITE_PATH: ${ORCH_SQLITE_PATH}
+      ALLOWED_HOSTS_PATH: /config/allowed_hosts
       ORCH_SCHEDULER_INTERVAL_SECONDS: ${ORCH_SCHEDULER_INTERVAL_SECONDS}
       EXTRACTOR_URL: ${EXTRACTOR_URL}
       LOADER_URL: ${LOADER_URL}
@@ -216,8 +217,9 @@ services:
       MART_SERVICE_PASSWORD: ${MART_SERVICE_PASSWORD}
     volumes:
       - ./orchestrator/data:/data:z
+      - ./extractor/conf/allowed_hosts:/config/allowed_hosts:ro,z
     ports:
-      - "${ORCHESTRATOR_PORT}:8000"
+      - "${ORCHESTRATOR_PORT}:8080"
     networks: [dw]
     depends_on:
       extractor:
@@ -229,7 +231,7 @@ services:
       mart:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://localhost:8000/health',timeout=5)"]
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://localhost:8080/health',timeout=10)"]
       interval: 5s
       timeout: 5s
       retries: 10
