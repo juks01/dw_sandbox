@@ -41,6 +41,7 @@ def init_db() -> None:
                 cron TEXT NOT NULL,
                 enabled INTEGER NOT NULL DEFAULT 1,
                 next_run TEXT,
+                next_run_timezone TEXT,
                 load_mode TEXT NOT NULL DEFAULT 'full_snapshot',
                 delete_policy TEXT NOT NULL DEFAULT 'close_on_full_snapshot',
                 key_fields TEXT NOT NULL DEFAULT '[]',
@@ -75,6 +76,7 @@ def init_db() -> None:
             "incremental_param": "TEXT NOT NULL DEFAULT 'updated_since'",
             "watermark_field": "TEXT NOT NULL DEFAULT 'updated_at'",
             "checkpoint": "TEXT",
+            "next_run_timezone": "TEXT",
         })
         _ensure_columns(conn, "runs", {
             "checkpoint_before": "TEXT",
@@ -174,11 +176,13 @@ def create_source(
         return _source_dict(row)
 
 
-def update_source_next_run(source_id: int, next_run_iso: Optional[str]) -> None:
+def update_source_next_run(
+    source_id: int, next_run_iso: Optional[str], timezone_name: Optional[str],
+) -> None:
     with get_db() as conn:
         conn.execute(
-            "UPDATE sources SET next_run = ? WHERE id = ?",
-            (next_run_iso, source_id)
+            "UPDATE sources SET next_run = ?, next_run_timezone = ? WHERE id = ?",
+            (next_run_iso, timezone_name, source_id)
         )
 
 
@@ -192,6 +196,8 @@ def update_source(
             """
             UPDATE sources
             SET name = ?, url = ?, cron = ?, enabled = ?, load_mode = ?, delete_policy = ?,
+                next_run = CASE WHEN cron <> ? THEN NULL ELSE next_run END,
+                next_run_timezone = CASE WHEN cron <> ? THEN NULL ELSE next_run_timezone END,
                 key_fields = ?, incremental_param = ?, watermark_field = ?,
                 checkpoint = CASE
                     WHEN url <> ? OR load_mode <> ? OR incremental_param <> ?
@@ -200,9 +206,9 @@ def update_source(
                 END
             WHERE id = ?
             """,
-            (name, url, cron, 1 if enabled else 0, load_mode, delete_policy, json.dumps(key_fields),
-             incremental_param, watermark_field, url, load_mode, incremental_param,
-             watermark_field, source_id),
+            (name, url, cron, 1 if enabled else 0, load_mode, delete_policy, cron, cron,
+             json.dumps(key_fields), incremental_param, watermark_field, url, load_mode,
+             incremental_param, watermark_field, source_id),
         )
         return cur.rowcount > 0
 

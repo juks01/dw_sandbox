@@ -1,3 +1,4 @@
+import logging
 import tempfile
 import unittest
 import httpx
@@ -5,6 +6,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from orchestrator.app import db, pipeline
+from orchestrator.app.access_log import HealthAccessLogFilter
 
 
 class FakeResponse:
@@ -84,6 +86,41 @@ class PipelineCheckpointTests(unittest.TestCase):
         source = db.get_source(self.source["id"])
         self.assertEqual(source["checkpoint"], self.checkpoint_before)
 
+    def test_incremental_source_without_watermark_runs_without_checkpoint(self):
+        source = {**self.source, "watermark_field": "", "checkpoint": None}
+        requests = []
+
+        def responses(url, **kwargs):
+            requests.append((url, kwargs["json"]))
+            if url.endswith("/extract"):
+                return FakeResponse({
+                    "filename": "items.json",
+                    "source_url": source["url"],
+                    "checkpoint_after": None,
+                    "pagination_complete": True,
+                })
+            return FakeResponse({"batch_id": 42, "tables": {"items": 1}})
+
+        with (
+            patch.object(pipeline, "full_health", return_value={
+                "dependencies": {"extractor": True, "loader": True, "staging": True, "core": True, "mart": True},
+            }),
+            patch.object(pipeline.httpx, "post", side_effect=responses),
+            patch.object(pipeline, "call_core_sync", return_value=[
+                {"source_table": "items", "dim_table": "dim_items"},
+            ]),
+            patch.object(pipeline, "call_mart_refresh", return_value=[]),
+        ):
+            pipeline.run_pipeline_steps(source, self.run_id)
+
+        run = db.get_run(self.run_id)
+        self.assertEqual(run["load_mode"], "incremental_upsert")
+        self.assertIsNone(run["checkpoint_before"])
+        self.assertIsNone(run["checkpoint_after"])
+        self.assertEqual(requests[0][1]["load_mode"], "incremental_upsert")
+        self.assertIsNone(requests[0][1]["checkpoint_before"])
+        self.assertFalse(requests[0][1]["watermark_required"])
+
     def test_http_error_includes_service_status_and_response_detail(self):
         response = httpx.Response(
             500,
@@ -144,6 +181,47 @@ class HealthCheckLoggingTests(unittest.TestCase):
         self.assertIn("staging", captured.output[0])
         self.assertIn("staging:5432/staging", captured.output[0])
         self.assertIn("connection refused", captured.output[0])
+
+    def test_successful_health_checks_log_concise_dependency_status(self):
+        response = httpx.Response(
+            200, request=httpx.Request("GET", "http://extractor:8000/health"),
+        )
+        with (
+            patch.object(pipeline.httpx, "get", return_value=response),
+            self.assertLogs("uvicorn.error", level="INFO") as captured,
+        ):
+            self.assertTrue(pipeline.check_extractor())
+
+        self.assertEqual(
+            captured.records[0].getMessage(),
+            'extractor: "GET /health" - 200 OK',
+        )
+
+    def test_successful_database_health_check_logs_query(self):
+        with (
+            patch.object(pipeline.psycopg, "connect"),
+            self.assertLogs("uvicorn.error", level="INFO") as captured,
+        ):
+            self.assertTrue(pipeline.check_staging())
+
+        self.assertEqual(
+            captured.records[0].getMessage(),
+            'staging: "SELECT 1" - OK',
+        )
+
+    def test_health_access_filter_suppresses_only_health_endpoint(self):
+        access_filter = HealthAccessLogFilter()
+        health_record = logging.LogRecord(
+            "uvicorn.access", logging.INFO, __file__, 1, "%s - %s",
+            ("127.0.0.1", "GET", "/health", "1.1", 200), None,
+        )
+        api_record = logging.LogRecord(
+            "uvicorn.access", logging.INFO, __file__, 1, "%s - %s",
+            ("127.0.0.1", "GET", "/api/sources", "1.1", 200), None,
+        )
+
+        self.assertFalse(access_filter.filter(health_record))
+        self.assertTrue(access_filter.filter(api_record))
 
 
 if __name__ == "__main__":

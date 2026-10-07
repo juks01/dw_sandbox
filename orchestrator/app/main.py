@@ -11,6 +11,7 @@ from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 
 from . import db, pipeline, runner, scheduler
+from .access_log import install_health_access_log_filter
 from .auth import require_auth
 
 app = FastAPI(title="dw-dev orchestrator")
@@ -20,6 +21,7 @@ STATIC_DIR = Path(__file__).parent / "static"
 
 @app.on_event("startup")
 async def on_startup() -> None:
+    install_health_access_log_filter()
     db.init_db()
     scheduler.start()
 
@@ -73,12 +75,14 @@ def _validate_source_settings(body: SourceCreate) -> None:
         parsed_url.scheme.lower() not in {"http", "https"} or not parsed_url.hostname
     ):
         raise HTTPException(status_code=422, detail="url must be an absolute HTTP(S) URL or local://demo")
-    if body.load_mode == "incremental_upsert" and (
-        not body.incremental_param.strip() or not body.watermark_field.strip()
+    if (
+        body.load_mode == "incremental_upsert"
+        and body.watermark_field.strip()
+        and not body.incremental_param.strip()
     ):
         raise HTTPException(
             status_code=422,
-            detail="incremental_upsert requires an incremental parameter and watermark field",
+            detail="incremental query parameter is required when a watermark field is configured",
         )
     if any(not key.strip() for key in body.key_fields):
         raise HTTPException(status_code=422, detail="key_fields cannot contain empty values")

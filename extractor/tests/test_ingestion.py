@@ -59,6 +59,38 @@ class ExtractionMetadataTests(unittest.TestCase):
         self.assertEqual(manifest["load_mode"], "incremental_upsert")
         self.assertEqual(manifest["checkpoint_before"], "2026-10-01T10:00:00+00:00")
 
+    def test_incremental_without_watermark_fetches_endpoint_without_checkpoint(self):
+        requested_urls = []
+
+        def fake_get(url, **kwargs):
+            requested_urls.append(str(url))
+            return httpx.Response(
+                200, json=[{"id": 1, "name": "current"}],
+                request=httpx.Request("GET", url),
+                headers={"content-type": "application/json"},
+            )
+
+        url = "https://example.test/items?view=latest"
+        with patch.object(main, "is_allowed_url", return_value=True), patch.object(httpx, "get", fake_get):
+            response = self.client.post(
+                "/extract",
+                json={
+                    "source": "items",
+                    "url": url,
+                    "load_mode": "incremental_upsert",
+                    "incremental_param": "",
+                    "watermark_field": "",
+                },
+            )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(requested_urls, [url])
+        self.assertIsNone(response.json()["checkpoint_after"])
+        manifest = json.loads(
+            (Path(self.temp_dir.name) / response.json()["manifest_filename"]).read_text()
+        )
+        self.assertIsNone(manifest["checkpoint_after"])
+
     def test_dummyjson_offset_pagination_fetches_and_combines_every_page(self):
         payload_by_skip = {
             0: {"products": [{"id": 1}], "total": 3, "skip": 0, "limit": 1},

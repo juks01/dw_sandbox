@@ -119,8 +119,8 @@ GRANT EXECUTE ON FUNCTION core.sync_users(text, text) TO core_service;
 
 -- =======================================================================
 -- core.sync_from_staging(): one explicit staging batch -> core.dim_<table>
--- Business key: configured keys when present on a table, otherwise "id" when present, otherwise
--- an md5 hash of every source column. Only full snapshots close missing keys.
+-- Business key: configured keys when present on a table, otherwise "id" when present.
+-- Content hashes detect changes but are not used as business keys. Full snapshots close missing keys.
 -- Identifiers are only ever built with format(%I/%L) from information_schema,
 -- never from raw user/source input, and are additionally normalized.
 --
@@ -273,7 +273,6 @@ BEGIN
             SELECT 1 FROM information_schema.columns
             WHERE table_schema = 'staging_ext' AND table_name = tbl.table_name AND column_name = 'id'
         ) INTO has_id;
-
         hash_expr := format('md5(COALESCE((%s)::text, ''''))', data_col_list);
         normalized_keys := ARRAY(
             SELECT left(
@@ -311,15 +310,23 @@ BEGIN
                     FROM unnest(normalized_keys) WITH ORDINALITY AS keys(key_field, ord);
                     bk_expr := format('row(%s)::text', col_list);
                 END IF;
+            ELSIF NOT v_in_batch THEN
+                bk_expr := 'NULL::text';
             ELSIF has_id THEN
                 bk_expr := 's.id::text';
             ELSE
-                bk_expr := hash_expr;
+                RAISE EXCEPTION
+                    'configured key field(s) are missing from source batch % for table %; no id column is available',
+                    p_batch_id, tbl.table_name;
             END IF;
         ELSIF has_id THEN
             bk_expr := 's.id::text';
+        ELSIF NOT v_in_batch THEN
+            bk_expr := 'NULL::text';
         ELSE
-            bk_expr := hash_expr;
+            RAISE EXCEPTION
+                'source table % has no stable business key; configure key fields or provide an id column',
+                tbl.table_name;
         END IF;
 
         SELECT string_agg(format('%I', column_name), ', ' ORDER BY ordinal_position)
@@ -347,7 +354,8 @@ BEGIN
         GET DIAGNOSTICS v_closed1 = ROW_COUNT;
 
         -- 2) close current dim rows whose business key disappeared from the source
-        IF p_load_mode = 'full_snapshot' AND p_delete_policy = 'close_on_full_snapshot' THEN
+        IF p_delete_policy = 'close_on_full_snapshot'
+           AND p_load_mode = 'full_snapshot' THEN
             sql := format(
                 'WITH latest AS (
                     SELECT DISTINCT ON ((%s)) *

@@ -11,11 +11,17 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
 from . import db
+from .access_log import install_health_access_log_filter
 from .flatten import flatten_payload
 
 LANDING_DIR = Path(os.environ.get("LANDING_DIR", "/landing"))
 
 app = FastAPI(title="dw-dev loader")
+
+
+@app.on_event("startup")
+async def configure_access_logging() -> None:
+    install_health_access_log_filter()
 
 
 class LoadRequest(BaseModel):
@@ -40,6 +46,7 @@ def health() -> dict:
 
 @app.post("/load")
 def load(req: LoadRequest) -> dict:
+    """Validate the extraction manifest before recording its payload as one batch."""
     req_filename = Path(req.filename)
 
     if req_filename.name != req.filename:
@@ -92,6 +99,7 @@ def load(req: LoadRequest) -> dict:
             raise HTTPException(status_code=409, detail=f"{field} does not match extraction manifest")
     expected_sha256 = manifest.get("sha256")
     actual_sha256 = hashlib.sha256(file_path.read_bytes()).hexdigest()
+    # Reject altered or mismatched landing files before any staging writes occur.
     if expected_sha256 != actual_sha256:
         raise HTTPException(status_code=409, detail="landing payload checksum does not match manifest")
 

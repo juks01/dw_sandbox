@@ -27,6 +27,30 @@ class SourceValidationTests(unittest.TestCase):
         self.assertEqual(context.exception.status_code, 422)
         self.assertIn("absolute HTTP(S) URL", context.exception.detail)
 
+    def test_accepts_incremental_upsert_without_watermark(self):
+        _validate_source_settings(SourceCreate(
+            name="items",
+            url="https://example.test/items",
+            cron="0 * * * *",
+            load_mode="incremental_upsert",
+            incremental_param="",
+            watermark_field="",
+        ))
+
+    def test_watermark_requires_incremental_query_parameter(self):
+        with self.assertRaises(HTTPException) as context:
+            _validate_source_settings(SourceCreate(
+                name="items",
+                url="https://example.test/items",
+                cron="0 * * * *",
+                load_mode="incremental_upsert",
+                incremental_param="",
+                watermark_field="updated_at",
+            ))
+
+        self.assertEqual(context.exception.status_code, 422)
+        self.assertIn("query parameter", context.exception.detail)
+
 
 if __name__ == "__main__":
     unittest.main()

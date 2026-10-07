@@ -92,6 +92,7 @@ class DemoSourceInitializationTests(unittest.TestCase):
         self.assertEqual(source["delete_policy"], "close_on_full_snapshot")
         self.assertEqual(source["key_fields"], [])
         self.assertIsNone(source["checkpoint"])
+        self.assertIn("next_run_timezone", source)
         with closing(sqlite3.connect(db.DB_PATH)) as conn:
             run_columns = {row[1] for row in conn.execute("PRAGMA table_info(runs)")}
         self.assertIn("checkpoint_after", run_columns)
@@ -110,6 +111,15 @@ class DemoSourceInitializationTests(unittest.TestCase):
             source["load_mode"], "never_close", ["id"], "updated_since", "updated_at",
         ))
         self.assertEqual(db.get_source(source["id"])["checkpoint"], "2026-10-01T12:00:00+00:00")
+
+        db.update_source_next_run(source["id"], "2026-10-01T13:00:00+00:00", "UTC")
+        db.update_source(
+            source["id"], source["name"], source["url"], "30 * * * *", True,
+            source["load_mode"], "never_close", ["id"], "updated_since", "updated_at",
+        )
+        source = db.get_source(source["id"])
+        self.assertIsNone(source["next_run"])
+        self.assertIsNone(source["next_run_timezone"])
 
         db.update_source(
             source["id"], source["name"], source["url"], source["cron"], True,

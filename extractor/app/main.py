@@ -12,6 +12,8 @@ import os
 import re
 import tempfile
 import uuid
+from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -20,6 +22,7 @@ import httpx
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
+from .access_log import install_health_access_log_filter
 from .config import is_allowed_url
 
 LANDING_DIR = Path(os.environ.get("LANDING_DIR", "/landing"))
@@ -27,7 +30,14 @@ DEMO_PAYLOAD_PATH = Path(__file__).resolve().parent.parent / "conf" / "demo.json
 USER_AGENT = os.environ.get("EXTRACTOR_USER_AGENT", "dw-dev-extractor/1.0")
 MAX_PAGINATION_PAGES = 1000
 
-app = FastAPI(title="dw-dev extractor")
+
+@asynccontextmanager
+async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
+    install_health_access_log_filter()
+    yield
+
+
+app = FastAPI(title="dw-dev extractor", lifespan=lifespan)
 
 
 class ExtractRequest(BaseModel):
@@ -198,6 +208,7 @@ def _get_http_page(url: str) -> httpx.Response:
     current_url = url
     try:
         for _ in range(11):
+            # Revalidate every redirect target so an allowed API cannot redirect outside the allowlist.
             if not is_allowed_url(current_url):
                 raise HTTPException(status_code=403, detail="redirect or pagination host is not allowed")
             response = httpx.get(
@@ -245,6 +256,7 @@ def health() -> dict[str, str]:
 
 @app.post("/extract", response_model=ExtractResponse)
 def extract(req: ExtractRequest) -> ExtractResponse:
+    """Fetch every supported page and atomically publish payload plus manifest."""
     if not req.source.strip():
         raise HTTPException(status_code=400, detail="source is required")
 
@@ -255,10 +267,14 @@ def extract(req: ExtractRequest) -> ExtractResponse:
     delete_policy = req.delete_policy or "close_on_full_snapshot"
     if delete_policy not in {"close_on_full_snapshot", "never_close"}:
         raise HTTPException(status_code=400, detail="unsupported missing-key policy")
-    if req.load_mode == "incremental_upsert" and (
-        not req.checkpoint_before or not req.incremental_param.strip() or not req.watermark_field.strip()
+    uses_watermark = bool(req.watermark_field.strip())
+    if req.load_mode == "incremental_upsert" and uses_watermark and (
+        not req.checkpoint_before or not req.incremental_param.strip()
     ):
-        raise HTTPException(status_code=400, detail="incremental extraction requires a checkpoint, query parameter, and watermark field")
+        raise HTTPException(
+            status_code=400,
+            detail="timestamp-based incremental extraction requires a checkpoint and query parameter",
+        )
 
     if not is_allowed_url(req.url):
         raise HTTPException(status_code=403, detail="url host is not allowed by extractor allowlist")
@@ -274,7 +290,7 @@ def extract(req: ExtractRequest) -> ExtractResponse:
         page_count = 1
     else:
         current_url = req.url
-        if req.load_mode == "incremental_upsert":
+        if req.load_mode == "incremental_upsert" and uses_watermark:
             current_url = str(
                 httpx.URL(current_url).copy_merge_params(
                     {req.incremental_param: req.checkpoint_before}
@@ -296,6 +312,7 @@ def extract(req: ExtractRequest) -> ExtractResponse:
             if aggregate is None:
                 aggregate = copy.deepcopy(page_payload)
             else:
+                # Keep paginated rows together so downstream stages see one complete source batch.
                 aggregate = _merge_page_payload(aggregate, page_payload)
             page_count += 1
             final_url = str(resp.url)
@@ -336,7 +353,9 @@ def extract(req: ExtractRequest) -> ExtractResponse:
 
     fetched_at = datetime.now(timezone.utc).isoformat()
     checkpoint_after = None
-    if req.watermark_required or req.load_mode == "incremental_upsert":
+    if req.watermark_required or (
+        req.load_mode == "incremental_upsert" and uses_watermark
+    ):
         try:
             checkpoint_after = _checkpoint_after(
                 payload, req.watermark_field, req.checkpoint_before,
@@ -404,17 +423,3 @@ def _write_atomically(destination: Path, content: bytes) -> None:
     except Exception:
         temporary_path.unlink(missing_ok=True)
         raise
-
-
-def _fetch_http_source(url: str) -> bytes:
-    try:
-        resp = httpx.get(
-            url,
-            headers={"User-Agent": USER_AGENT},
-            timeout=30.0,
-            follow_redirects=True,
-        )
-        resp.raise_for_status()
-    except httpx.HTTPError as exc:
-        raise HTTPException(status_code=502, detail=f"upstream request failed: {exc}") from exc
-    return resp.content

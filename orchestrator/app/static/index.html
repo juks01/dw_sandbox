@@ -111,11 +111,11 @@
     </div>
     <table>
       <thead>
-        <tr><th>Name</th><th>URL</th><th>Cron</th><th>Load mode</th><th>Missing-key policy</th><th>Checkpoint</th><th>Last success</th><th>Error</th><th>Next run (local)</th><th>Enabled</th><th></th></tr>
+        <tr><th>Name</th><th>URL</th><th>Cron (<span class="cron-timezone"></span>)</th><th>Load mode</th><th>Missing-key policy</th><th>Checkpoint</th><th>Last success</th><th>Error</th><th>Next run</th><th>Enabled</th><th></th></tr>
       </thead>
       <tbody id="sources-body"><tr><td colspan="11">Loading…</td></tr></tbody>
     </table>
-    <p class="refresh-note">Incremental sources use updated_since and updated_at by default. Their first run is a full snapshot. The API must support the configured query filter for runs to fetch only changed rows.</p>
+    <p class="refresh-note">Cron schedules and next-run times use the configured timezone (<span class="cron-timezone"></span>). Timestamp-based incremental sources use updated_since and updated_at by default. Their first run is a full snapshot. Without a watermark, each incremental run fetches the complete endpoint and upserts its rows.</p>
   </div>
 
   <div class="panel">
@@ -147,7 +147,7 @@
       <input type="text" id="add-name" placeholder="e.g. products">
       <label for="add-url">URL</label>
       <input type="text" id="add-url" placeholder="https://api.example.com/products">
-      <label for="add-cron">Cron</label>
+      <label for="add-cron">Cron schedule (<span class="cron-timezone"></span>)</label>
       <input type="text" id="add-cron" placeholder="e.g. */15 * * * *">
       <label for="add-load-mode">Load mode</label>
       <select id="add-load-mode">
@@ -160,15 +160,15 @@
         <option value="never_close">Never close missing keys</option>
       </select>
       <label for="add-key-fields">Key fields (comma-separated, optional)
-        <span class="field-info" tabindex="0" role="img" aria-label="Key fields help" data-tooltip="Business key column(s) in the returned records, for example id. This is not the name of an API query parameter. Leave blank to use id automatically when present.">i</span>
+        <span class="field-info" tabindex="0" role="img" aria-label="Key fields help" data-tooltip="Stable business key column(s) in returned records, for example id; this is not an API query parameter. Leave blank only when records contain an id column, which is used automatically. Records without a stable key are rejected; content hashes are not used as IDs.">i</span>
       </label>
       <input type="text" id="add-key-fields" placeholder="e.g. id">
       <label for="add-incremental-param">Incremental query parameter
-        <span class="field-info" tabindex="0" role="img" aria-label="Incremental query parameter help" data-tooltip="Name of the URL query parameter the API accepts to return records changed since a timestamp. Common default: updated_since. The API must support this filter.">i</span>
+        <span class="field-info" tabindex="0" role="img" aria-label="Incremental query parameter help" data-tooltip="Name of the URL query parameter the API accepts to return records changed since a timestamp. Common default: updated_since. Required only when a watermark field is set; the API must support this filter.">i</span>
       </label>
       <input type="text" id="add-incremental-param" value="updated_since">
       <label for="add-watermark-field">Watermark field (ISO timestamp)
-        <span class="field-info" tabindex="0" role="img" aria-label="Watermark field help" data-tooltip="JSON field containing each record's last-updated timestamp, for example updated_at or updatedAt. The extractor uses its latest value as the next checkpoint.">i</span>
+        <span class="field-info" tabindex="0" role="img" aria-label="Watermark field help" data-tooltip="Optional JSON field containing each record's last-updated timestamp, for example updated_at or updatedAt. Leave blank if the API has no timestamp; then each run fetches the full endpoint response and upserts it without a checkpoint.">i</span>
       </label>
       <input type="text" id="add-watermark-field" value="updated_at">
       <div class="checkbox-row">
@@ -191,7 +191,7 @@
       <input type="text" id="edit-name">
       <label for="edit-url">URL</label>
       <input type="text" id="edit-url">
-      <label for="edit-cron">Cron</label>
+      <label for="edit-cron">Cron schedule (<span class="cron-timezone"></span>)</label>
       <input type="text" id="edit-cron">
       <label for="edit-load-mode">Load mode</label>
       <select id="edit-load-mode">
@@ -203,17 +203,23 @@
         <option value="close_on_full_snapshot">Close only on full snapshots</option>
         <option value="never_close">Never close missing keys</option>
       </select>
-      <label for="edit-key-fields">Key fields (comma-separated, optional)</label>
+      <label for="edit-key-fields">Key fields (comma-separated, optional)
+        <span class="field-info" tabindex="0" role="img" aria-label="Key fields help" data-tooltip="Stable business key column(s) in returned records, for example id; this is not an API query parameter. Leave blank only when records contain an id column, which is used automatically. Records without a stable key are rejected; content hashes are not used as IDs.">i</span>
+      </label>
       <input type="text" id="edit-key-fields">
-      <label for="edit-incremental-param">Incremental query parameter</label>
+      <label for="edit-incremental-param">Incremental query parameter
+        <span class="field-info" tabindex="0" role="img" aria-label="Incremental query parameter help" data-tooltip="Name of the URL query parameter accepted by the API to filter records since a timestamp. Required only when a watermark field is set.">i</span>
+      </label>
       <input type="text" id="edit-incremental-param">
-      <label for="edit-watermark-field">Watermark field (ISO timestamp)</label>
+      <label for="edit-watermark-field">Watermark field (ISO timestamp)
+        <span class="field-info" tabindex="0" role="img" aria-label="Watermark field help" data-tooltip="Optional JSON timestamp field used as the next checkpoint. Leave blank when the API has no timestamp; each run fetches the full endpoint and upserts it without a checkpoint.">i</span>
+      </label>
       <input type="text" id="edit-watermark-field">
       <div class="checkbox-row">
         <input type="checkbox" id="edit-enabled">
         <label for="edit-enabled">Active</label>
       </div>
-      <p class="refresh-note">Missing keys follow the selected policy; incremental batches never infer deletion from absence.</p>
+      <p class="refresh-note">Missing keys follow the selected policy. Records need a stable key field or an id column. Without a watermark, each incremental run fetches the complete endpoint and upserts records by that stable key.</p>
       <div class="modal-actions">
         <button class="danger" onclick="fullReloadEditedSource()">Full reload</button>
         <button class="secondary" onclick="closeEditModal()">Cancel</button>
@@ -263,6 +269,7 @@ function badge(label, ok) {
 }
 
 const APP_TIME_ZONE = __APP_TIME_ZONE__;
+document.querySelectorAll('.cron-timezone').forEach(el => { el.textContent = APP_TIME_ZONE; });
 
 function formatTimestamp(value) {
   if (!value) return '-';

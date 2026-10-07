@@ -61,13 +61,20 @@ in `.env`, default `admin` / `admin`)
 Shows system health, source load modes, missing-key policies, checkpoints,
 last successful runs, recent errors and pipeline runs. The source editor
 configures key fields, deletion policy, an incremental query parameter and a
-watermark field. Incremental sources use
-`updated_since` and `updated_at` by default; their first run is always a full
-snapshot. The source API must actually honor the configured query parameter
-to return a delta; otherwise each incremental upsert may still download the
-entire response. The full reload action runs a snapshot immediately and
-advances an incremental source's checkpoint only after the entire pipeline
-succeeds.
+watermark field. Key fields are optional only when returned records contain an
+`id` column, which is used automatically. Otherwise, configure stable key fields;
+rows without either are rejected. Content hashes are still used to detect SCD2
+changes, but never as business keys because they change when row content changes.
+Incremental sources use `updated_since` and `updated_at` by default; a
+timestamp-based source's first run is always a full snapshot. The source API
+must actually honor the configured query parameter to return a delta;
+otherwise each incremental upsert may still download the entire response.
+The watermark field is optional: when blank, each incremental run fetches
+the complete endpoint (including supported pagination), does not pass a
+timestamp query parameter or use a checkpoint, and upserts stable keys. This
+permits incremental upserts for APIs without update timestamps. The full
+reload action runs a snapshot immediately and advances a timestamp-based
+incremental source's checkpoint only after the entire pipeline succeeds.
 
 ## Health
 - http://localhost:8080/health — open liveness check
@@ -138,8 +145,8 @@ environment. The `DW_TEST_*_HOST` and `DW_TEST_*_PORT` variables can be
 changed when the databases use different compose service names or internal
 ports. The suite sends generated flat-array, DummyJSON `/products`-shaped
 paginated/nested product, and nested object/array API payloads through
-Extractor and Loader, then verifies the resulting records and flattened
-columns through the read-only mart role.
+Extractor and Loader. It verifies keyed payloads through the read-only mart
+role and confirms that keyless response tables are rejected by Core.
 
 Every run is recorded in the orchestrator's own SQLite database
 (`orchestrator/data/orchestrator.db`) with its current step and, on failure,
@@ -157,6 +164,10 @@ staging tables and builds/maintains the matching
 table automatically.
 
 ## Cron examples
+Cron expressions are evaluated in the timezone configured by `TZ` in `.env`
+(default `Europe/Helsinki`), including daylight-saving changes. The Sources
+table shows next-run timestamps in the same timezone.
+
 ```
 0 1 * * *       daily at 01:00
 0 3 * * *       daily at 03:00

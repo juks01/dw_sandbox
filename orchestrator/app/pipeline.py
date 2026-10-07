@@ -11,6 +11,7 @@ import psycopg
 from . import db
 
 logger = logging.getLogger("dw.health")
+health_check_logger = logging.getLogger("uvicorn.error")
 _health_log_lock = threading.Lock()
 _health_log_states: dict[str, bool] = {}
 
@@ -61,6 +62,7 @@ def _pg_select_1(name: str, host: str, port: int, dbname: str, user: str, passwo
     except Exception as exc:
         _log_health_result(name, target, False, str(exc))
         return False
+    health_check_logger.info('%s: "SELECT 1" - OK', name)
     _log_health_result(name, target, True)
     return True
 
@@ -74,6 +76,12 @@ def _check_http_service(name: str, url: str) -> bool:
     except httpx.HTTPError as exc:
         _log_health_result(name, url, False, str(exc))
         return False
+    health_check_logger.info(
+        '%s: "GET /health" - %s %s',
+        name,
+        response.status_code,
+        response.reason_phrase or "OK",
+    )
     _log_health_result(name, url, True)
     return True
 
@@ -120,6 +128,7 @@ def check_mart() -> bool:
 
 
 def full_health() -> dict[str, Any]:
+    """Check every pipeline dependency before a run starts."""
     checks = {
         "extractor": check_extractor(),
         "loader": check_loader(),
@@ -199,10 +208,13 @@ def run_pipeline_steps(source: dict, run_id: int, force_full: bool = False) -> N
     """Run one source through extract, load, core and mart."""
     source_name = source["name"]
     source_url = source["url"]
-    checkpoint_before = None if force_full else source.get("checkpoint")
+    watermark_field = (source.get("watermark_field") or "").strip()
+    checkpoint_before = (
+        None if force_full or not watermark_field else source.get("checkpoint")
+    )
     load_mode = (
         "full_snapshot"
-        if force_full or not checkpoint_before
+        if force_full or (watermark_field and not checkpoint_before)
         else source["load_mode"]
     )
     key_fields = source.get("key_fields") or []
@@ -227,8 +239,10 @@ def run_pipeline_steps(source: dict, run_id: int, force_full: bool = False) -> N
                 "delete_policy": source["delete_policy"],
                 "checkpoint_before": checkpoint_before,
                 "incremental_param": source["incremental_param"],
-                "watermark_field": source["watermark_field"],
-                "watermark_required": source["load_mode"] == "incremental_upsert",
+                "watermark_field": watermark_field,
+                "watermark_required": (
+                    source["load_mode"] == "incremental_upsert" and bool(watermark_field)
+                ),
             },
             timeout=60.0,
         )
@@ -245,7 +259,7 @@ def run_pipeline_steps(source: dict, run_id: int, force_full: bool = False) -> N
     checkpoint_after = extract_result.get("checkpoint_after")
     if not extract_result.get("pagination_complete", False):
         raise PipelineError("extract", "source response is paginated; all pages must be fetched before loading")
-    if source["load_mode"] == "incremental_upsert" and not checkpoint_after:
+    if load_mode == "incremental_upsert" and watermark_field and not checkpoint_after:
         raise PipelineError("extract", "incremental source did not produce a checkpoint")
     db.update_run(run_id, checkpoint_after=checkpoint_after)
     db.update_run(run_id, filename=filename)
@@ -307,6 +321,7 @@ def run_pipeline_steps(source: dict, run_id: int, force_full: bool = False) -> N
     except Exception as exc:
         raise PipelineError("mart", str(exc)) from exc
 
+    # Commit the watermark only after every downstream publish step succeeds.
     if checkpoint_after:
         db.update_source_checkpoint(source_name, checkpoint_after)
     db.update_run(run_id, status="done", step="done", finished=db.now_iso())

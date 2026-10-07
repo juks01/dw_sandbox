@@ -330,7 +330,7 @@ class ExtractorToMartTests(unittest.TestCase):
         self.assertEqual({row["title"] for row in published}, {"Integration item v2"})
         self.assertTrue({"valid_from", "valid_to", "is_current"}.isdisjoint(columns))
 
-    def test_supported_api_json_shapes_reach_mart(self):
+    def test_supported_api_json_shapes_require_stable_keys_and_reach_mart(self):
         cases = {
             "flat-array": {
                 "url": "https://example.test/flat-array",
@@ -406,7 +406,10 @@ class ExtractorToMartTests(unittest.TestCase):
                     "id": 9910301,
                     "name": "Nested API object",
                     "profile": {"region": "north", "verified": True},
-                    "tags": ["priority", "customer"],
+                    "tags": [
+                        {"id": 9910302, "value": "priority"},
+                        {"id": 9910303, "value": "customer"},
+                    ],
                     "orders": [{"id": 9910311, "amount": 27.5}],
                 },
             },
@@ -476,6 +479,21 @@ class ExtractorToMartTests(unittest.TestCase):
                     loaded = load_response.json()
                     table_names.update(loaded["tables"])
                     created.append((source, table_names))
+
+                    if case_name == "dummyjson-products":
+                        with self.assertRaisesRegex(
+                            self.psycopg.Error, "no id column is available"
+                        ):
+                            with self.psycopg.connect(**self.core_service) as conn:
+                                with conn.cursor() as cur:
+                                    cur.execute(
+                                        "SELECT * FROM core.sync_from_staging(%s, %s, %s, %s, %s)",
+                                        (
+                                            loaded["batch_id"], source, "full_snapshot",
+                                            "close_on_full_snapshot", ["id"],
+                                        ),
+                                    )
+                        continue
 
                     with self.psycopg.connect(**self.core_service) as conn:
                         with conn.cursor() as cur:
@@ -595,6 +613,121 @@ class ExtractorToMartTests(unittest.TestCase):
                 with self.psycopg.connect(**self.staging_admin) as conn:
                     with conn.cursor() as cur:
                         cur.execute("DELETE FROM staging.raw_batches WHERE source = %s", (source,))
+
+    def test_timestamp_free_incremental_without_stable_key_is_rejected(self):
+        source = f"{self.source}-no-stable-key"
+        dimension = f"dim_{source.replace('-', '_')}"
+        url = "https://example.test/current-items"
+        payloads = [[{"name": "Item without an ID", "price": 10}]]
+        requested_urls = []
+        original_get = self.httpx.get
+        original_allow = self.extractor.is_allowed_url
+
+        def fake_get(requested_url: str, **kwargs):
+            requested_urls.append(requested_url)
+            revision = int(self.httpx.URL(requested_url).params["revision"])
+            return self.httpx.Response(
+                200,
+                json=payloads[revision - 1],
+                headers={"content-type": "application/json"},
+                request=self.httpx.Request("GET", requested_url),
+            )
+
+        self.extractor.is_allowed_url = lambda requested_url: requested_url.startswith(
+            "https://example.test/"
+        )
+        self.httpx.get = fake_get
+        created_tables: set[str] = set()
+        try:
+            with (
+                self.TestClient(self.extractor.app) as extractor_client,
+                self.TestClient(self.loader.app) as loader_client,
+            ):
+                for revision in range(1, len(payloads) + 1):
+                    source_url = f"{url}?revision={revision}"
+                    extracted_response = extractor_client.post(
+                        "/extract",
+                        json={
+                            "source": source,
+                            "url": source_url,
+                            "run_id": f"{source}-run-{revision}",
+                            "load_mode": "incremental_upsert",
+                            "delete_policy": "close_on_full_snapshot",
+                            "incremental_param": "",
+                            "watermark_field": "",
+                        },
+                    )
+                    extracted_response.raise_for_status()
+                    extracted = extracted_response.json()
+                    self.assertIsNone(extracted["checkpoint_after"])
+
+                    manifest = json.loads(
+                        (Path(self.temp_dir.name) / extracted["manifest_filename"])
+                        .read_text(encoding="utf-8")
+                    )
+                    self.assertIsNone(manifest["checkpoint_after"])
+                    loaded_response = loader_client.post(
+                        "/load",
+                        json={
+                            "filename": extracted["filename"],
+                            "source": source,
+                            "source_url": source_url,
+                            "load_mode": manifest["load_mode"],
+                            "delete_policy": manifest["delete_policy"],
+                            "run_id": manifest["run_id"],
+                            "checkpoint_before": manifest["checkpoint_before"],
+                            "checkpoint_after": manifest["checkpoint_after"],
+                            "pagination_complete": manifest["pagination_complete"],
+                        },
+                    )
+                    loaded_response.raise_for_status()
+                    batch = loaded_response.json()
+                    created_tables.update(batch["tables"])
+
+                    with self.assertRaisesRegex(self.psycopg.Error, "no stable business key"):
+                        with self.psycopg.connect(**self.core_service) as conn:
+                            with conn.cursor() as cur:
+                                cur.execute(
+                                    "SELECT * FROM core.sync_from_staging(%s, %s, %s, %s, %s)",
+                                    (
+                                        batch["batch_id"], source, "incremental_upsert",
+                                        "close_on_full_snapshot", [],
+                                    ),
+                                )
+
+                    with self.psycopg.connect(**self.core_admin) as conn:
+                        with conn.cursor() as cur:
+                            cur.execute(
+                                "SELECT 1 FROM information_schema.tables "
+                                "WHERE table_schema = 'core' AND table_name = %s",
+                                (dimension,),
+                            )
+                            self.assertIsNone(cur.fetchone())
+
+            self.assertEqual(
+                [self.httpx.URL(requested_url).params["revision"] for requested_url in requested_urls],
+                ["1"],
+            )
+        finally:
+            self.httpx.get = original_get
+            self.extractor.is_allowed_url = original_allow
+            for staging_table in created_tables:
+                for settings, schema, name in (
+                    (self.mart_admin, "mart", staging_table),
+                    (self.core_admin, "core", f"dim_{staging_table}"),
+                    (self.staging_admin, "staging", staging_table),
+                ):
+                    with self.psycopg.connect(**settings) as conn:
+                        with conn.cursor() as cur:
+                            cur.execute(
+                                self.sql.SQL("DROP TABLE IF EXISTS {}.{} CASCADE").format(
+                                    self.sql.Identifier(schema),
+                                    self.sql.Identifier(name),
+                                )
+                            )
+            with self.psycopg.connect(**self.staging_admin) as conn:
+                with conn.cursor() as cur:
+                    cur.execute("DELETE FROM staging.raw_batches WHERE source = %s", (source,))
 
     def test_core_user_rows_are_filtered_by_department_rls(self):
         with self.psycopg.connect(**self.core_reader) as conn:
