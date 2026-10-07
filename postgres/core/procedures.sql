@@ -24,7 +24,6 @@ DECLARE
     v_dept_closed bigint := 0;
     v_user_upserts bigint := 0;
     v_user_closed bigint := 0;
-    v_rowcount bigint;
 BEGIN
     IF p_load_mode IS NULL OR p_load_mode NOT IN ('full_snapshot', 'incremental_upsert') THEN
         RAISE EXCEPTION 'unsupported load mode: %', p_load_mode;
@@ -45,8 +44,7 @@ BEGIN
     WHERE p_load_mode = 'full_snapshot'
       AND p_delete_policy = 'close_on_full_snapshot' AND d.is_current
       AND NOT EXISTS (SELECT 1 FROM users_ext.department s WHERE s.department_id = d.department_id);
-    GET DIAGNOSTICS v_rowcount = ROW_COUNT;
-    v_dept_closed := v_dept_closed + v_rowcount;
+    GET DIAGNOSTICS v_dept_closed = ROW_COUNT;
 
     FOR rec IN
         SELECT s.department_id, s.code, s.name,
@@ -83,8 +81,7 @@ BEGIN
     WHERE p_load_mode = 'full_snapshot'
       AND p_delete_policy = 'close_on_full_snapshot' AND d.is_current
       AND NOT EXISTS (SELECT 1 FROM users_ext.end_user s WHERE s.user_id = d.user_id);
-    GET DIAGNOSTICS v_rowcount = ROW_COUNT;
-    v_user_closed := v_user_closed + v_rowcount;
+    GET DIAGNOSTICS v_user_closed = ROW_COUNT;
 
     FOR rec IN
         SELECT s.user_id, s.username, s.full_name, s.department_id, s.is_active,
