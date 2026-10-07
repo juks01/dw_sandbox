@@ -5,12 +5,13 @@ import hashlib
 import json
 import os
 from pathlib import Path
-from typing import Optional
+from typing import Literal, Optional
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
 from . import db
+from .access_log import install_health_access_log_filter
 from .flatten import flatten_payload
 
 LANDING_DIR = Path(os.environ.get("LANDING_DIR", "/landing"))
@@ -18,10 +19,21 @@ LANDING_DIR = Path(os.environ.get("LANDING_DIR", "/landing"))
 app = FastAPI(title="dw-dev loader")
 
 
+@app.on_event("startup")
+async def configure_access_logging() -> None:
+    install_health_access_log_filter()
+
+
 class LoadRequest(BaseModel):
     filename: str
     source: Optional[str] = None
     source_url: Optional[str] = None
+    load_mode: Literal["full_snapshot", "incremental_upsert"] = "full_snapshot"
+    delete_policy: Literal["close_on_full_snapshot", "never_close"] | None = None
+    run_id: Optional[str] = None
+    checkpoint_before: Optional[str] = None
+    checkpoint_after: Optional[str] = None
+    pagination_complete: bool = True
 
 
 @app.get("/health")
@@ -34,6 +46,7 @@ def health() -> dict:
 
 @app.post("/load")
 def load(req: LoadRequest) -> dict:
+    """Validate the extraction manifest before recording its payload as one batch."""
     req_filename = Path(req.filename)
 
     if req_filename.name != req.filename:
@@ -68,8 +81,25 @@ def load(req: LoadRequest) -> dict:
 
     if manifest.get("payload_filename") != req.filename:
         raise HTTPException(status_code=400, detail="manifest payload filename does not match request")
+    if req.source and manifest.get("source") != req.source:
+        raise HTTPException(status_code=409, detail="source does not match extraction manifest")
+    if req.run_id and manifest.get("run_id") != req.run_id:
+        raise HTTPException(status_code=409, detail="run ID does not match extraction manifest")
+    if manifest.get("load_mode", "full_snapshot") != req.load_mode:
+        raise HTTPException(status_code=409, detail="load mode does not match extraction manifest")
+    delete_policy = req.delete_policy or manifest.get("delete_policy", "close_on_full_snapshot")
+    if delete_policy not in {"close_on_full_snapshot", "never_close"}:
+        raise HTTPException(status_code=400, detail="manifest contains an unsupported missing-key policy")
+    if manifest.get("delete_policy", "close_on_full_snapshot") != delete_policy:
+        raise HTTPException(status_code=409, detail="delete policy does not match extraction manifest")
+    for field in ("checkpoint_before", "checkpoint_after", "pagination_complete"):
+        requested = getattr(req, field)
+        manifested = manifest.get(field, True if field == "pagination_complete" else None)
+        if requested != manifested:
+            raise HTTPException(status_code=409, detail=f"{field} does not match extraction manifest")
     expected_sha256 = manifest.get("sha256")
     actual_sha256 = hashlib.sha256(file_path.read_bytes()).hexdigest()
+    # Reject altered or mismatched landing files before any staging writes occur.
     if expected_sha256 != actual_sha256:
         raise HTTPException(status_code=409, detail="landing payload checksum does not match manifest")
 
@@ -78,7 +108,19 @@ def load(req: LoadRequest) -> dict:
 
     try:
         flatten_fn = functools.partial(flatten_payload, source, payload)
-        result = db.load_payload(req.filename, source, source_url, payload, flatten_fn)
+        result = db.load_payload(
+            req.filename,
+            source,
+            source_url,
+            payload,
+            flatten_fn,
+            req.load_mode,
+            delete_policy,
+            req.run_id or manifest.get("run_id"),
+            req.checkpoint_before,
+            req.checkpoint_after,
+            req.pagination_complete,
+        )
     except Exception as exc:  # noqa: BLE001 - surface to orchestrator as a load failure
         raise HTTPException(status_code=500, detail=f"load failed: {exc}") from exc
 

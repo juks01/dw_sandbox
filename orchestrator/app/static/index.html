@@ -31,6 +31,7 @@
   table { width: 100%; border-collapse: collapse; font-size: 13px; }
   th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); }
   th { color: var(--muted); font-weight: 500; }
+  td.load-mode { max-width: 90px; overflow-wrap: anywhere; }
   .status-pill { padding: 3px 8px; border-radius: 6px; font-size: 12px; font-weight: 600; }
   .st-done { background: rgba(34,197,94,0.15); color: var(--green); }
   .st-failed { background: rgba(239,68,68,0.15); color: var(--red); }
@@ -42,9 +43,14 @@
   button.danger { background: var(--red); }
   button:hover { opacity: 0.85; }
   .error-text { color: var(--red); font-size: 12px; max-width: 320px; overflow-wrap: break-word; }
-  .row-form { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
-  .row-form input { background: #0b1222; border: 1px solid var(--border); color: var(--text);
-    border-radius: 6px; padding: 6px 8px; font-size: 12px; }
+  .error-modal { width: 760px; max-width: 92vw; }
+  .error-detail {
+    margin: 0; padding: 12px; background: #0b1222; border: 1px solid var(--border);
+    border-radius: 6px; max-height: 55vh; overflow: auto; white-space: pre-wrap;
+    overflow-wrap: anywhere; font: 12px/1.5 ui-monospace, SFMono-Regular, Consolas, monospace;
+  }
+  .panel-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+  .panel-heading h2 { margin: 0 0 12px 0; }
   .refresh-note { color: var(--muted); font-size: 11px; margin-top: 8px; }
   .modal-overlay {
     display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.55);
@@ -53,7 +59,7 @@
   .modal-overlay.open { display: flex; }
   .modal {
     background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
-    padding: 20px; width: 360px; max-width: 90vw;
+    padding: 20px; width: 420px; max-width: 90vw; max-height: 90vh; overflow-y: auto;
   }
   .modal h3 { margin: 0 0 14px 0; font-size: 15px; }
   .modal label { display: block; font-size: 12px; color: var(--muted); margin: 10px 0 4px 0; }
@@ -61,9 +67,31 @@
     width: 100%; background: #0b1222; border: 1px solid var(--border); color: var(--text);
     border-radius: 6px; padding: 7px 8px; font-size: 13px;
   }
+  .modal select {
+    width: 100%; background: #0b1222; border: 1px solid var(--border); color: var(--text);
+    border-radius: 6px; padding: 7px 8px; font-size: 13px;
+  }
   .modal .checkbox-row { display: flex; align-items: center; gap: 8px; margin-top: 14px; }
   .modal .checkbox-row label { margin: 0; color: var(--text); font-size: 13px; }
   .modal .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px; }
+  .field-info {
+    display: inline-flex; position: relative; align-items: center; justify-content: center;
+    width: 15px; height: 15px; margin-left: 4px; border: 1px solid var(--muted);
+    border-radius: 50%; color: var(--muted); font-size: 10px; font-weight: 600;
+    cursor: help; vertical-align: middle;
+  }
+  .field-info::after {
+    content: attr(data-tooltip); position: absolute; left: 50%; bottom: calc(100% + 8px);
+    z-index: 60; width: 250px; padding: 8px 10px; border: 1px solid var(--border);
+    border-radius: 6px; background: #0b1222; color: var(--text); font-size: 12px;
+    font-weight: 400; line-height: 1.4; white-space: normal; text-align: left;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.3); opacity: 0; visibility: hidden;
+    transform: translate(-50%, 3px); transition: opacity 120ms ease, transform 120ms ease;
+    pointer-events: none;
+  }
+  .field-info:hover::after, .field-info:focus-visible::after {
+    opacity: 1; visibility: visible; transform: translate(-50%, 0);
+  }
   button.secondary { background: var(--border); }
 </style>
 </head>
@@ -77,31 +105,82 @@
   </div>
 
   <div class="panel">
-    <h2>Sources</h2>
+    <div class="panel-heading">
+      <h2>Sources</h2>
+      <button onclick="openAddModal()">Add source</button>
+    </div>
     <table>
       <thead>
-        <tr><th>Name</th><th>URL</th><th>Cron</th><th>Next run (UTC)</th><th>Enabled</th><th></th></tr>
+        <tr><th>Name</th><th>URL</th><th>Cron (<span class="cron-timezone"></span>)</th><th>Load mode</th><th>Missing-key policy</th><th>Checkpoint</th><th>Last success</th><th>Error</th><th>Next run</th><th>Enabled</th><th></th></tr>
       </thead>
-      <tbody id="sources-body"><tr><td colspan="6">Loading…</td></tr></tbody>
+      <tbody id="sources-body"><tr><td colspan="11">Loading…</td></tr></tbody>
     </table>
-
-    <div class="row-form">
-      <input id="new-name" placeholder="name">
-      <input id="new-url" placeholder="url" style="width:220px">
-      <input id="new-cron" placeholder="cron, e.g. */15 * * * *" style="width:160px">
-      <button onclick="createSource()">Add source</button>
-    </div>
+    <p class="refresh-note">Cron schedules and next-run times use the configured timezone (<span class="cron-timezone"></span>). Timestamp-based incremental sources use updated_since and updated_at by default. Their first run is a full snapshot. Without a watermark, each incremental run fetches the complete endpoint and upserts its rows.</p>
   </div>
 
   <div class="panel">
     <h2>Recent pipeline runs</h2>
     <table>
       <thead>
-        <tr><th>ID</th><th>Source</th><th>Status</th><th>Step</th><th>Started</th><th>Finished</th><th>Error</th></tr>
+        <tr><th>ID</th><th>Source</th><th>Mode</th><th>Checkpoint before → after</th><th>Status</th><th>Step</th><th>Started</th><th>Finished</th><th>Error</th></tr>
       </thead>
-      <tbody id="runs-body"><tr><td colspan="7">Loading…</td></tr></tbody>
+      <tbody id="runs-body"><tr><td colspan="9">Loading…</td></tr></tbody>
     </table>
     <p class="refresh-note">Auto-refreshes every 3s.</p>
+  </div>
+
+  <div id="error-overlay" class="modal-overlay" role="dialog" aria-modal="true" aria-labelledby="error-title">
+    <div class="modal error-modal">
+      <h3 id="error-title">Pipeline error</h3>
+      <p id="error-context" class="refresh-note"></p>
+      <pre id="error-detail" class="error-detail"></pre>
+      <div class="modal-actions">
+        <button class="secondary" onclick="closeErrorModal()">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="add-overlay" class="modal-overlay">
+    <div class="modal">
+      <h3>Add source</h3>
+      <label for="add-name">Name</label>
+      <input type="text" id="add-name" placeholder="e.g. products">
+      <label for="add-url">URL</label>
+      <input type="text" id="add-url" placeholder="https://api.example.com/products">
+      <label for="add-cron">Cron schedule (<span class="cron-timezone"></span>)</label>
+      <input type="text" id="add-cron" placeholder="e.g. */15 * * * *">
+      <label for="add-load-mode">Load mode</label>
+      <select id="add-load-mode">
+        <option value="full_snapshot">Full snapshot</option>
+        <option value="incremental_upsert">Incremental upsert</option>
+      </select>
+      <label for="add-delete-policy">Missing-key policy</label>
+      <select id="add-delete-policy">
+        <option value="close_on_full_snapshot">Close only on full snapshots</option>
+        <option value="never_close">Never close missing keys</option>
+      </select>
+      <label for="add-key-fields">Key fields (comma-separated, optional)
+        <span class="field-info" tabindex="0" role="img" aria-label="Key fields help" data-tooltip="Stable business key column(s) in returned records, for example id; this is not an API query parameter. Leave blank only when records contain an id column, which is used automatically. Records without a stable key are rejected; content hashes are not used as IDs.">i</span>
+      </label>
+      <input type="text" id="add-key-fields" placeholder="e.g. id">
+      <label for="add-incremental-param">Incremental query parameter
+        <span class="field-info" tabindex="0" role="img" aria-label="Incremental query parameter help" data-tooltip="Name of the URL query parameter the API accepts to return records changed since a timestamp. Common default: updated_since. Required only when a watermark field is set; the API must support this filter.">i</span>
+      </label>
+      <input type="text" id="add-incremental-param" value="updated_since">
+      <label for="add-watermark-field">Watermark field (ISO timestamp)
+        <span class="field-info" tabindex="0" role="img" aria-label="Watermark field help" data-tooltip="Optional JSON field containing each record's last-updated timestamp, for example updated_at or updatedAt. Leave blank if the API has no timestamp; then each run fetches the full endpoint response and upserts it without a checkpoint.">i</span>
+      </label>
+      <input type="text" id="add-watermark-field" value="updated_at">
+      <div class="checkbox-row">
+        <input type="checkbox" id="add-enabled" checked>
+        <label for="add-enabled">Active</label>
+      </div>
+      <p class="refresh-note">Incremental extraction only fetches changed rows when the API supports the configured query parameter.</p>
+      <div class="modal-actions">
+        <button class="secondary" onclick="closeAddModal()">Cancel</button>
+        <button onclick="createSource()">Add source</button>
+      </div>
+    </div>
   </div>
 
   <div id="edit-overlay" class="modal-overlay">
@@ -112,13 +191,37 @@
       <input type="text" id="edit-name">
       <label for="edit-url">URL</label>
       <input type="text" id="edit-url">
-      <label for="edit-cron">Cron</label>
+      <label for="edit-cron">Cron schedule (<span class="cron-timezone"></span>)</label>
       <input type="text" id="edit-cron">
+      <label for="edit-load-mode">Load mode</label>
+      <select id="edit-load-mode">
+        <option value="full_snapshot">Full snapshot</option>
+        <option value="incremental_upsert">Incremental upsert</option>
+      </select>
+      <label for="edit-delete-policy">Missing-key policy</label>
+      <select id="edit-delete-policy">
+        <option value="close_on_full_snapshot">Close only on full snapshots</option>
+        <option value="never_close">Never close missing keys</option>
+      </select>
+      <label for="edit-key-fields">Key fields (comma-separated, optional)
+        <span class="field-info" tabindex="0" role="img" aria-label="Key fields help" data-tooltip="Stable business key column(s) in returned records, for example id; this is not an API query parameter. Leave blank only when records contain an id column, which is used automatically. Records without a stable key are rejected; content hashes are not used as IDs.">i</span>
+      </label>
+      <input type="text" id="edit-key-fields">
+      <label for="edit-incremental-param">Incremental query parameter
+        <span class="field-info" tabindex="0" role="img" aria-label="Incremental query parameter help" data-tooltip="Name of the URL query parameter accepted by the API to filter records since a timestamp. Required only when a watermark field is set.">i</span>
+      </label>
+      <input type="text" id="edit-incremental-param">
+      <label for="edit-watermark-field">Watermark field (ISO timestamp)
+        <span class="field-info" tabindex="0" role="img" aria-label="Watermark field help" data-tooltip="Optional JSON timestamp field used as the next checkpoint. Leave blank when the API has no timestamp; each run fetches the full endpoint and upserts it without a checkpoint.">i</span>
+      </label>
+      <input type="text" id="edit-watermark-field">
       <div class="checkbox-row">
         <input type="checkbox" id="edit-enabled">
         <label for="edit-enabled">Active</label>
       </div>
+      <p class="refresh-note">Missing keys follow the selected policy. Records need a stable key field or an id column. Without a watermark, each incremental run fetches the complete endpoint and upserts records by that stable key.</p>
       <div class="modal-actions">
+        <button class="danger" onclick="fullReloadEditedSource()">Full reload</button>
         <button class="secondary" onclick="closeEditModal()">Cancel</button>
         <button onclick="saveEditedSource()">Save</button>
       </div>
@@ -165,6 +268,33 @@ function badge(label, ok) {
   return `<span class="badge"><span class="dot ${ok ? 'ok' : 'bad'}"></span>${label}</span>`;
 }
 
+const APP_TIME_ZONE = __APP_TIME_ZONE__;
+document.querySelectorAll('.cron-timezone').forEach(el => { el.textContent = APP_TIME_ZONE; });
+
+function formatTimestamp(value) {
+  if (!value) return '-';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: APP_TIME_ZONE,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hourCycle: 'h23',
+    timeZoneName: 'shortOffset'
+  }).formatToParts(date);
+  const fields = Object.fromEntries(parts.map(part => [part.type, part.value]));
+  const offset = (fields.timeZoneName || '').replace(/^GMT/, '') || '+0';
+  return `${fields.year}-${fields.month}-${fields.day} ${fields.hour}:${fields.minute}:${fields.second} (${offset})`;
+}
+
+function missingKeyPolicy(policy) {
+  return policy === 'close_on_full_snapshot' ? 'Close on full snapshot' : 'Never close';
+}
+
 async function refreshHealth() {
   const el = document.getElementById('health');
   try {
@@ -192,6 +322,37 @@ async function deleteSource(id) {
 }
 
 let editSources = [];
+let recentRuns = [];
+
+function showError(kind, id) {
+  const record = kind === 'source'
+    ? editSources.find(item => String(item.id) === String(id))
+    : recentRuns.find(item => String(item.id) === String(id));
+  if (!record?.error && !record?.last_error) return;
+  const error = record.error ?? record.last_error;
+  const step = record.step ?? record.last_error_step ?? 'unknown';
+  const name = kind === 'source' ? record.name : `Run #${record.id} · ${record.source}`;
+  const runId = kind === 'source' ? record.last_error_run_id : record.id;
+  const started = kind === 'source' ? record.last_error_started : record.started;
+  document.getElementById('error-title').textContent = `Pipeline error: ${name}`;
+  document.getElementById('error-context').textContent =
+    `Phase: ${step} · Run: #${runId}${started ? ` · Started: ${formatTimestamp(started)}` : ''}`;
+  document.getElementById('error-detail').textContent = error;
+  document.getElementById('error-overlay').classList.add('open');
+}
+
+function closeErrorModal() {
+  document.getElementById('error-overlay').classList.remove('open');
+}
+
+function openAddModal() {
+  document.getElementById('add-overlay').classList.add('open');
+  document.getElementById('add-name').focus();
+}
+
+function closeAddModal() {
+  document.getElementById('add-overlay').classList.remove('open');
+}
 
 function openEditModal(id) {
   const s = editSources.find(x => x.id === id);
@@ -200,6 +361,11 @@ function openEditModal(id) {
   document.getElementById('edit-name').value = s.name;
   document.getElementById('edit-url').value = s.url;
   document.getElementById('edit-cron').value = s.cron;
+  document.getElementById('edit-load-mode').value = s.load_mode;
+  document.getElementById('edit-delete-policy').value = s.delete_policy;
+  document.getElementById('edit-key-fields').value = (s.key_fields || []).join(', ');
+  document.getElementById('edit-incremental-param').value = s.incremental_param;
+  document.getElementById('edit-watermark-field').value = s.watermark_field;
   document.getElementById('edit-enabled').checked = !!s.enabled;
   document.getElementById('edit-overlay').classList.add('open');
 }
@@ -214,9 +380,14 @@ async function saveEditedSource() {
   const url = document.getElementById('edit-url').value.trim();
   const cron = document.getElementById('edit-cron').value.trim();
   const enabled = document.getElementById('edit-enabled').checked;
+  const load_mode = document.getElementById('edit-load-mode').value;
+  const delete_policy = document.getElementById('edit-delete-policy').value;
+  const key_fields = document.getElementById('edit-key-fields').value.split(',').map(x => x.trim()).filter(Boolean);
+  const incremental_param = document.getElementById('edit-incremental-param').value.trim();
+  const watermark_field = document.getElementById('edit-watermark-field').value.trim();
   if (!name || !url || !cron) { alert('name, url and cron are all required'); return; }
   try {
-    await apiPut(`/api/sources/${id}`, { name, url, cron, enabled });
+    await apiPut(`/api/sources/${id}`, { name, url, cron, enabled, load_mode, delete_policy, key_fields, incremental_param, watermark_field });
     closeEditModal();
     refreshSources();
   } catch (e) {
@@ -224,16 +395,47 @@ async function saveEditedSource() {
   }
 }
 
-async function createSource() {
-  const name = document.getElementById('new-name').value.trim();
-  const url = document.getElementById('new-url').value.trim();
-  const cron = document.getElementById('new-cron').value.trim();
+async function fullReloadEditedSource() {
+  const id = document.getElementById('edit-id').value;
+  if (!confirm('Run a full snapshot now? This will close current dimension rows missing from the complete source response.')) return;
+  const name = document.getElementById('edit-name').value.trim();
+  const url = document.getElementById('edit-url').value.trim();
+  const cron = document.getElementById('edit-cron').value.trim();
+  const enabled = document.getElementById('edit-enabled').checked;
+  const load_mode = document.getElementById('edit-load-mode').value;
+  const delete_policy = document.getElementById('edit-delete-policy').value;
+  const key_fields = document.getElementById('edit-key-fields').value.split(',').map(x => x.trim()).filter(Boolean);
+  const incremental_param = document.getElementById('edit-incremental-param').value.trim();
+  const watermark_field = document.getElementById('edit-watermark-field').value.trim();
   if (!name || !url || !cron) { alert('name, url and cron are all required'); return; }
   try {
-    await apiPost('/api/sources', { name, url, cron, enabled: true });
-    document.getElementById('new-name').value = '';
-    document.getElementById('new-url').value = '';
-    document.getElementById('new-cron').value = '';
+    await apiPut(`/api/sources/${id}`, { name, url, cron, enabled, load_mode, delete_policy, key_fields, incremental_param, watermark_field });
+    await apiPost(`/api/sources/${id}/full-reload`);
+    closeEditModal();
+    refreshAll();
+  } catch (e) {
+    alert(e.message);
+  }
+}
+
+async function createSource() {
+  const name = document.getElementById('add-name').value.trim();
+  const url = document.getElementById('add-url').value.trim();
+  const cron = document.getElementById('add-cron').value.trim();
+  const enabled = document.getElementById('add-enabled').checked;
+  const load_mode = document.getElementById('add-load-mode').value;
+  const delete_policy = document.getElementById('add-delete-policy').value;
+  const key_fields = document.getElementById('add-key-fields').value.split(',').map(x => x.trim()).filter(Boolean);
+  const incremental_param = document.getElementById('add-incremental-param').value.trim();
+  const watermark_field = document.getElementById('add-watermark-field').value.trim();
+  if (!name || !url || !cron) { alert('name, url and cron are all required'); return; }
+  try {
+    await apiPost('/api/sources', { name, url, cron, enabled, load_mode, delete_policy, key_fields, incremental_param, watermark_field });
+    document.getElementById('add-name').value = '';
+    document.getElementById('add-url').value = '';
+    document.getElementById('add-cron').value = '';
+    document.getElementById('add-key-fields').value = '';
+    closeAddModal();
     refreshSources();
   } catch (e) {
     alert(e.message);
@@ -250,16 +452,22 @@ async function refreshSources() {
         <td>${s.name}</td>
         <td>${s.url}</td>
         <td>${s.cron}</td>
-        <td>${s.next_run ?? '-'}</td>
+        <td class="load-mode">${s.load_mode.replaceAll('_', ' ')}</td>
+        <td>${missingKeyPolicy(s.delete_policy)}</td>
+        <td>${formatTimestamp(s.checkpoint)}</td>
+        <td>${formatTimestamp(s.last_successful_run)}</td>
+        <td>${s.last_error ? `<button class="danger" onclick="showError('source', ${s.id})">Show</button>` : ''}</td>
+        <td>${formatTimestamp(s.next_run)}</td>
         <td>${s.enabled ? 'yes' : 'no'}</td>
         <td>
           <button onclick="runSource(${s.id})">Run</button>
           <button class="secondary" onclick="openEditModal(${s.id})">Edit</button>
           <button class="danger" onclick="deleteSource(${s.id})">Delete</button>
         </td>
-      </tr>`).join('') || '<tr><td colspan="6">No sources yet</td></tr>';
+      </tr>
+    `).join('') || '<tr><td colspan="11">No sources yet</td></tr>';
   } catch (e) {
-    body.innerHTML = `<tr><td colspan="6" class="error-text">${e.message}</td></tr>`;
+    body.innerHTML = `<tr><td colspan="11" class="error-text">${e.message}</td></tr>`;
   }
 }
 
@@ -271,18 +479,22 @@ async function refreshRuns() {
   const body = document.getElementById('runs-body');
   try {
     const runs = await apiGet('/api/runs?limit=30');
+    recentRuns = runs;
     body.innerHTML = runs.map(r => `
       <tr>
         <td>${r.id}</td>
         <td>${r.source}</td>
+        <td>${r.load_mode ?? '-'}</td>
+        <td>${formatTimestamp(r.checkpoint_before)} → ${formatTimestamp(r.checkpoint_after)}</td>
         <td><span class="status-pill ${statusClass(r.status)}">${r.status}</span></td>
         <td>${r.step ?? '-'}</td>
-        <td>${r.started ?? '-'}</td>
-        <td>${r.finished ?? '-'}</td>
-        <td class="error-text">${r.error ?? ''}</td>
-      </tr>`).join('') || '<tr><td colspan="7">No runs yet</td></tr>';
+        <td>${formatTimestamp(r.started)}</td>
+        <td>${formatTimestamp(r.finished)}</td>
+        <td>${r.error ? `<button class="danger" onclick="showError('run', ${r.id})">Show</button>` : ''}</td>
+      </tr>
+    `).join('') || '<tr><td colspan="9">No runs yet</td></tr>';
   } catch (e) {
-    body.innerHTML = `<tr><td colspan="7" class="error-text">${e.message}</td></tr>`;
+    body.innerHTML = `<tr><td colspan="9" class="error-text">${e.message}</td></tr>`;
   }
 }
 

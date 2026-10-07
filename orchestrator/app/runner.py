@@ -27,7 +27,7 @@ def _finish(source_name: str) -> None:
         _running.discard(source_name)
 
 
-async def trigger_run(source: dict) -> int:
+async def trigger_run(source: dict, force_full: bool = False) -> int:
     """Starts a pipeline run for `source` in the background.
     Raises RuntimeError if that source already has a run in flight
     (caller is expected to turn this into an HTTP 409, per spec section 9)."""
@@ -38,7 +38,7 @@ async def trigger_run(source: dict) -> int:
 
     async def _worker() -> None:
         try:
-            await asyncio.to_thread(pipeline.run_pipeline_steps, source["name"], source["url"], run_id)
+            await asyncio.to_thread(pipeline.run_pipeline_steps, source, run_id, force_full)
         except pipeline.PipelineError as exc:
             db.update_run(run_id, status="failed", step=exc.step, error=exc.message, finished=db.now_iso())
         except Exception as exc:  # noqa: BLE001 - last-resort catch so a run never hangs "running" forever
