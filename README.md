@@ -27,10 +27,10 @@ before/after, and whether pagination appears complete. The loader only loads
 a payload when its manifest exists, names the same payload, and contains a
 matching checksum. Both files are written atomically by the extractor.
 ## First
-Copy .env file template as .env file. You may use default values in dev. NEVER use default values in production!
+Copy `.env-template` to `.env`. You may use the default values in development.
+Never use development defaults in production.
 ```bash
-cd dw-dev
-cp .env-example .env
+cp .env-template .env
 ```
 
 ## Build environment
