@@ -78,14 +78,19 @@ incremental source's checkpoint only after the entire pipeline succeeds.
 
 ## Health
 - http://localhost:8080/health — open liveness check
-- http://localhost:8080/api/health — authenticated, aggregated dependency health
-  (extractor, loader, staging, core, mart)
+- http://localhost:8080/api/health — authenticated latest dependency-health
+  snapshot (Extractor, Loader, Staging, Users, Core, Mart)
 
-Each internal service also exposes its own unauthenticated health check,
-used by container healthchecks:
-- extractor → `GET /health`
-- loader → `GET /health`
-- staging / core / mart → `SELECT 1` (checked over psycopg by the orchestrator)
+The Orchestrator probes every dependency at startup and then every five
+seconds. It logs each result as `OK` or `ERROR` with the failing response or
+connection detail. The GUI only reads the most recently completed check
+snapshot; it does not initiate probes. Snapshot state is kept in Orchestrator
+memory because it is transient operational status, not pipeline history. A
+restart performs a fresh initial check before serving the GUI.
+
+Checks are Extractor and Loader `GET /health`, and `SELECT 1` against Staging,
+Users, Core, and Mart. Their own container health checks remain separate
+liveness/readiness probes.
 
 ## Database ports (host)
 | Database | Port |

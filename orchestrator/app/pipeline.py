@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import threading
+from datetime import datetime, timezone
 from typing import Any
 
 import httpx
@@ -10,42 +12,60 @@ import psycopg
 
 from . import db
 
-logger = logging.getLogger("dw.health")
 health_check_logger = logging.getLogger("uvicorn.error")
 _health_log_lock = threading.Lock()
-_health_log_states: dict[str, bool] = {}
+_health_details: dict[str, str] = {}
+HEALTH_DEPENDENCIES = ("extractor", "loader", "staging", "users", "core", "mart")
+_health_snapshot: dict[str, Any] = {
+    "status": "starting",
+    "dependencies": dict.fromkeys(HEALTH_DEPENDENCIES),
+    "details": {},
+    "checked_at": None,
+}
+HEALTH_CHECK_INTERVAL_SECONDS = 5
 
 EXTRACTOR_URL = os.environ.get("EXTRACTOR_URL", "http://extractor:8000")
 LOADER_URL = os.environ.get("LOADER_URL", "http://loader:8000")
 
 STAGING_HOST = os.environ.get("STAGING_HOST", "staging")
-STAGING_PORT = 5432 #int(os.environ.get("STAGING_PORT", "5432"))
+STAGING_PORT = 5432
 STAGING_DB = os.environ.get("STAGING_DB", "staging")
 STAGING_READER_USER = os.environ.get("STAGING_READER_USER", "staging_reader")
 STAGING_READER_PASSWORD = os.environ.get("STAGING_READER_PASSWORD", "")
 
+USERS_HOST = os.environ.get("USERS_HOST", "users")
+USERS_PORT = 5432
+USERS_DB = os.environ.get("USERS_DB", "users")
+USERS_READER_USER = os.environ.get("USERS_READER_USER", "users_reader")
+USERS_READER_PASSWORD = os.environ.get("USERS_READER_PASSWORD", "")
+
 CORE_HOST = os.environ.get("CORE_HOST", "core")
-CORE_PORT = 5432 #int(os.environ.get("CORE_PORT", "5432"))
+CORE_PORT = 5432
 CORE_DB = os.environ.get("CORE_DB", "core")
 CORE_SERVICE_USER = os.environ.get("CORE_SERVICE_USER", "core_service")
 CORE_SERVICE_PASSWORD = os.environ.get("CORE_SERVICE_PASSWORD", "")
 
 MART_HOST = os.environ.get("MART_HOST", "mart")
-MART_PORT = 5432 #int(os.environ.get("MART_PORT", "5432"))
+MART_PORT = 5432
 MART_DB = os.environ.get("MART_DB", "mart")
 MART_SERVICE_USER = os.environ.get("MART_SERVICE_USER", "mart_service")
 MART_SERVICE_PASSWORD = os.environ.get("MART_SERVICE_PASSWORD", "")
 
 
-def _log_health_result(name: str, target: str, healthy: bool, detail: str = "") -> None:
+def _log_health_result(
+    name: str, operation: str, target: str, healthy: bool, detail: str,
+) -> None:
     with _health_log_lock:
-        previous = _health_log_states.get(name)
-        _health_log_states[name] = healthy
+        _health_details[name] = detail if healthy else f"{detail} ({target})"
 
-    if not healthy and previous is not False:
-        logger.warning("Health check failed for %s (%s): %s", name, target, detail)
-    elif healthy and previous is False:
-        logger.info("Health check recovered for %s (%s)", name, target)
+    result = detail if healthy else f"ERROR: {detail} ({target})"
+    health_check_logger.log(
+        logging.INFO if healthy else logging.ERROR,
+        '%s: "%s" - %s',
+        name,
+        operation,
+        result,
+    )
 
 
 def _pg_select_1(name: str, host: str, port: int, dbname: str, user: str, password: str) -> bool:
@@ -58,29 +78,31 @@ def _pg_select_1(name: str, host: str, port: int, dbname: str, user: str, passwo
                 cur.execute("SELECT 1")
                 cur.fetchone()
     except Exception as exc:
-        _log_health_result(name, target, False, str(exc))
+        _log_health_result(name, "SELECT 1", target, False, str(exc) or type(exc).__name__)
         return False
-    health_check_logger.info('%s: "SELECT 1" - OK', name)
-    _log_health_result(name, target, True)
+    _log_health_result(name, "SELECT 1", target, True, "OK")
     return True
 
 
 def _check_http_service(name: str, url: str) -> bool:
     try:
         response = httpx.get(url, timeout=3.0)
-        if response.status_code != 200:
-            _log_health_result(name, url, False, f"HTTP {response.status_code}")
-            return False
-    except httpx.HTTPError as exc:
-        _log_health_result(name, url, False, str(exc))
+    except Exception as exc:
+        _log_health_result(name, "GET /health", url, False, str(exc) or type(exc).__name__)
         return False
-    health_check_logger.info(
-        '%s: "GET /health" - %s %s',
-        name,
-        response.status_code,
-        response.reason_phrase or "OK",
-    )
-    _log_health_result(name, url, True)
+    detail = f"{response.status_code} {response.reason_phrase or 'OK'}"
+    if response.status_code != 200:
+        try:
+            body = response.json()
+            if isinstance(body, dict):
+                detail += f": {body.get('detail') or response.text or 'no response body'}"
+            else:
+                detail += f": {response.text or 'no response body'}"
+        except ValueError:
+            detail += f": {response.text or 'no response body'}"
+        _log_health_result(name, "GET /health", url, False, detail)
+        return False
+    _log_health_result(name, "GET /health", url, True, detail)
     return True
 
 
@@ -112,6 +134,12 @@ def check_core() -> bool:
     )
 
 
+def check_users() -> bool:
+    return _pg_select_1(
+        "users", USERS_HOST, USERS_PORT, USERS_DB, USERS_READER_USER, USERS_READER_PASSWORD,
+    )
+
+
 def check_staging() -> bool:
     return _pg_select_1(
         "staging", STAGING_HOST, STAGING_PORT, STAGING_DB,
@@ -125,16 +153,52 @@ def check_mart() -> bool:
     )
 
 
-def full_health() -> dict[str, Any]:
-    """Check every pipeline dependency before a run starts."""
-    checks = {
-        "extractor": check_extractor(),
-        "loader": check_loader(),
-        "staging": check_staging(),
-        "core": check_core(),
-        "mart": check_mart(),
-    }
-    return {"status": "ok" if all(checks.values()) else "degraded", "dependencies": checks}
+def health_status() -> dict[str, Any]:
+    """Return the latest completed health-check cycle without probing services."""
+    with _health_log_lock:
+        return {
+            **_health_snapshot,
+            "dependencies": dict(_health_snapshot["dependencies"]),
+            "details": dict(_health_snapshot["details"]),
+        }
+
+
+async def refresh_health() -> dict[str, Any]:
+    """Probe every dependency concurrently and publish one complete snapshot."""
+    checks = (
+        ("extractor", check_extractor),
+        ("loader", check_loader),
+        ("staging", check_staging),
+        ("users", check_users),
+        ("core", check_core),
+        ("mart", check_mart),
+    )
+    results = await asyncio.gather(
+        *(asyncio.to_thread(check) for _, check in checks)
+    )
+    checked_at = datetime.now(timezone.utc).isoformat()
+    with _health_log_lock:
+        dependencies = dict(zip((name for name, _ in checks), results))
+        details = dict(_health_details)
+        _health_snapshot.update(
+            status=(
+                "starting" if any(value is None for value in dependencies.values())
+                else "ok" if all(dependencies.values()) else "degraded"
+            ),
+            dependencies=dependencies,
+            details=details,
+            checked_at=checked_at,
+        )
+    return health_status()
+
+
+async def health_check_loop() -> None:
+    loop = asyncio.get_running_loop()
+    next_check = loop.time()
+    while True:
+        next_check += HEALTH_CHECK_INTERVAL_SECONDS
+        await asyncio.sleep(max(0, next_check - loop.time()))
+        await refresh_health()
 
 
 def call_core_sync(
@@ -219,9 +283,12 @@ def run_pipeline_steps(source: dict, run_id: int, force_full: bool = False) -> N
     db.update_run(run_id, checkpoint_before=checkpoint_before, load_mode=load_mode)
 
     # Pre-flight dependency health checks: don't start against a known-down dependency.
-    health = full_health()
+    health = health_status()
     if not all(health["dependencies"].values()):
-        down = [k for k, v in health["dependencies"].items() if not v]
+        down = [
+            f"{name}: {health.get('details', {}).get(name, 'unavailable')}"
+            for name, healthy in health["dependencies"].items() if not healthy
+        ]
         raise PipelineError("health_check", f"dependencies unavailable: {', '.join(down)}")
 
     # ---- extract ----

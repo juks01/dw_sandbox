@@ -25,9 +25,10 @@
   .badge {
     display: inline-flex; align-items: center; gap: 6px; padding: 6px 10px;
     border-radius: 999px; font-size: 12px; border: 1px solid var(--border);
+    max-width: 100%; overflow-wrap: anywhere;
   }
   .dot { width: 8px; height: 8px; border-radius: 50%; }
-  .ok { background: var(--green); } .bad { background: var(--red); }
+  .ok { background: var(--green); } .bad { background: var(--red); } .unknown { background: var(--amber); }
   table { width: 100%; border-collapse: collapse; font-size: 13px; }
   th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); }
   th { color: var(--muted); font-weight: 500; }
@@ -102,6 +103,7 @@
   <div class="panel">
     <h2>System health</h2>
     <div id="health" class="health-row">Loading…</div>
+    <p id="health-updated" class="refresh-note">Waiting for Orchestrator health checks…</p>
   </div>
 
   <div class="panel">
@@ -264,10 +266,6 @@ async function apiDelete(path) {
   return r.json();
 }
 
-function badge(label, ok) {
-  return `<span class="badge"><span class="dot ${ok ? 'ok' : 'bad'}"></span>${label}</span>`;
-}
-
 const APP_TIME_ZONE = __APP_TIME_ZONE__;
 document.querySelectorAll('.cron-timezone').forEach(el => { el.textContent = APP_TIME_ZONE; });
 
@@ -299,8 +297,22 @@ async function refreshHealth() {
   const el = document.getElementById('health');
   try {
     const h = await apiGet('/api/health');
-    el.innerHTML = Object.entries(h.dependencies)
-      .map(([name, ok]) => badge(name, ok)).join('');
+    el.replaceChildren();
+    Object.entries(h.dependencies).forEach(([name, ok]) => {
+      const badge = document.createElement('span');
+      const dot = document.createElement('span');
+      const detail = h.details?.[name] || 'No health-check result yet';
+      const state = ok === null ? 'unknown' : ok ? 'ok' : 'bad';
+      badge.className = 'badge';
+      badge.title = detail;
+      badge.append(`${name}: ${ok === null ? 'checking' : ok ? 'OK' : `ERROR — ${detail}`}`);
+      dot.className = `dot ${state}`;
+      badge.prepend(dot);
+      el.append(badge);
+    });
+    document.getElementById('health-updated').textContent = h.checked_at
+      ? `Last Orchestrator check: ${formatTimestamp(h.checked_at)} · checks run every 5 seconds`
+      : 'Waiting for Orchestrator health checks…';
   } catch (e) {
     el.innerHTML = '<span class="error-text">health check failed</span>';
   }
@@ -499,13 +511,14 @@ async function refreshRuns() {
 }
 
 function refreshAll() {
-  refreshHealth();
   refreshSources();
   refreshRuns();
 }
 
 refreshAll();
+refreshHealth();
 setInterval(refreshAll, 3000);
+setInterval(refreshHealth, 5000);
 </script>
 </body>
 </html>
