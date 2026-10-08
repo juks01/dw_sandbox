@@ -84,21 +84,15 @@ def flatten_payload(source: str, payload: Any, source_batch_id: int) -> dict[str
     """Entry point: flatten a whole extractor payload for `source`."""
     table_name = normalize_identifier(source)
     tables: dict[str, list[dict]] = {}
+    items = payload if isinstance(payload, list) else [payload]
 
-    if isinstance(payload, list):
-        for idx, item in enumerate(payload):
-            if isinstance(item, dict):
-                _flatten_object(table_name, item, source_batch_id, None, idx, tables)
-            else:
-                row = _new_row_shell(source_batch_id, None, idx)
-                row["value"] = item
-                tables.setdefault(table_name, []).append(row)
-    elif isinstance(payload, dict):
-        _flatten_object(table_name, payload, source_batch_id, None, 0, tables)
-    else:
-        row = _new_row_shell(source_batch_id, None, 0)
-        row["value"] = payload
-        tables.setdefault(table_name, []).append(row)
+    for idx, item in enumerate(items):
+        if isinstance(item, dict):
+            _flatten_object(table_name, item, source_batch_id, None, idx, tables)
+        else:
+            row = _new_row_shell(source_batch_id, None, idx)
+            row["value"] = item
+            tables.setdefault(table_name, []).append(row)
 
     tables.setdefault(table_name, [])
     return tables

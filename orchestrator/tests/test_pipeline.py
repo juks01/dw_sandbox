@@ -2,6 +2,7 @@ import logging
 import tempfile
 import unittest
 import httpx
+from contextlib import ExitStack
 from pathlib import Path
 from unittest.mock import patch
 
@@ -51,7 +52,7 @@ class PipelineCheckpointTests(unittest.TestCase):
 
     def _run(self, mart_refresh):
         with (
-            patch.object(pipeline, "full_health", return_value={
+            patch.object(pipeline, "health_status", return_value={
                 "dependencies": {"extractor": True, "loader": True, "staging": True, "core": True, "mart": True},
             }),
             patch.object(pipeline.httpx, "post", side_effect=self._responses),
@@ -102,7 +103,7 @@ class PipelineCheckpointTests(unittest.TestCase):
             return FakeResponse({"batch_id": 42, "tables": {"items": 1}})
 
         with (
-            patch.object(pipeline, "full_health", return_value={
+            patch.object(pipeline, "health_status", return_value={
                 "dependencies": {"extractor": True, "loader": True, "staging": True, "core": True, "mart": True},
             }),
             patch.object(pipeline.httpx, "post", side_effect=responses),
@@ -137,50 +138,49 @@ class PipelineCheckpointTests(unittest.TestCase):
 class HealthCheckLoggingTests(unittest.TestCase):
     def setUp(self):
         with pipeline._health_log_lock:
-            pipeline._health_log_states.clear()
+            pipeline._health_details.clear()
+            pipeline._health_snapshot.update(
+                status="starting",
+                dependencies=dict.fromkeys(pipeline.HEALTH_DEPENDENCIES),
+                details={},
+                checked_at=None,
+            )
 
     def tearDown(self):
         with pipeline._health_log_lock:
-            pipeline._health_log_states.clear()
+            pipeline._health_details.clear()
 
-    def test_http_failure_log_identifies_service_and_target_once_until_recovery(self):
-        response = httpx.Response(503, request=httpx.Request("GET", "http://extractor:8000/health"))
+    def test_each_http_check_logs_status_and_error_detail(self):
+        response = httpx.Response(
+            503,
+            request=httpx.Request("GET", "http://extractor:8000/health"),
+            json={"detail": "extractor is unavailable"},
+        )
         with (
             patch.object(pipeline.httpx, "get", return_value=response),
-            self.assertLogs("dw.health", level="WARNING") as captured,
+            self.assertLogs("uvicorn.error", level="ERROR") as captured,
         ):
             self.assertFalse(pipeline.check_extractor())
             self.assertFalse(pipeline.check_extractor())
 
-        self.assertEqual(len(captured.records), 1)
-        self.assertIn("extractor", captured.output[0])
-        self.assertIn("http://extractor:8000/health", captured.output[0])
-        self.assertIn("HTTP 503", captured.output[0])
-
-        with (
-            patch.object(
-                pipeline.httpx,
-                "get",
-                return_value=httpx.Response(
-                    200, request=httpx.Request("GET", "http://extractor:8000/health"),
-                ),
-            ),
-            self.assertLogs("dw.health", level="INFO") as captured,
-        ):
-            self.assertTrue(pipeline.check_extractor())
-
-        self.assertIn("Health check recovered for extractor", captured.output[0])
+        self.assertEqual(len(captured.records), 2)
+        self.assertEqual(
+            captured.records[0].getMessage(),
+            'extractor: "GET /health" - ERROR: 503 Service Unavailable: extractor is unavailable '
+            '(http://extractor:8000/health)',
+        )
 
     def test_database_failure_log_identifies_target_database(self):
         with (
             patch.object(pipeline.psycopg, "connect", side_effect=RuntimeError("connection refused")),
-            self.assertLogs("dw.health", level="WARNING") as captured,
+            self.assertLogs("uvicorn.error", level="ERROR") as captured,
         ):
             self.assertFalse(pipeline.check_staging())
 
-        self.assertIn("staging", captured.output[0])
-        self.assertIn("staging:5432/staging", captured.output[0])
-        self.assertIn("connection refused", captured.output[0])
+        self.assertEqual(
+            captured.records[0].getMessage(),
+            'staging: "SELECT 1" - ERROR: connection refused (staging:5432/staging)',
+        )
 
     def test_successful_health_checks_log_concise_dependency_status(self):
         response = httpx.Response(
@@ -209,6 +209,16 @@ class HealthCheckLoggingTests(unittest.TestCase):
             'staging: "SELECT 1" - OK',
         )
 
+    def test_health_api_returns_snapshot_without_triggering_checks(self):
+        from orchestrator.app import main
+
+        with patch.object(pipeline, "check_extractor") as check:
+            result = main.api_health("authenticated")
+
+        check.assert_not_called()
+        self.assertIn("dependencies", result)
+        self.assertIn("checked_at", result)
+
     def test_health_access_filter_suppresses_only_health_endpoint(self):
         access_filter = HealthAccessLogFilter()
         health_record = logging.LogRecord(
@@ -222,6 +232,37 @@ class HealthCheckLoggingTests(unittest.TestCase):
 
         self.assertFalse(access_filter.filter(health_record))
         self.assertTrue(access_filter.filter(api_record))
+
+
+class HealthSnapshotTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        with pipeline._health_log_lock:
+            pipeline._health_details.clear()
+            pipeline._health_snapshot.update(
+                status="starting",
+                dependencies=dict.fromkeys(pipeline.HEALTH_DEPENDENCIES),
+                details={},
+                checked_at=None,
+            )
+
+    async def test_refresh_checks_every_dependency_and_publishes_one_snapshot(self):
+        with ExitStack() as stack:
+            checks = {
+                name: stack.enter_context(
+                    patch.object(pipeline, f"check_{name}", return_value=name != "loader")
+                )
+                for name in pipeline.HEALTH_DEPENDENCIES
+            }
+            result = await pipeline.refresh_health()
+
+        self.assertEqual(result["status"], "degraded")
+        self.assertEqual(result["dependencies"], {
+            "extractor": True, "loader": False, "staging": True, "users": True,
+            "core": True, "mart": True,
+        })
+        self.assertIsNotNone(result["checked_at"])
+        for mocked_check in checks.values():
+            mocked_check.assert_called_once_with()
 
 
 if __name__ == "__main__":
