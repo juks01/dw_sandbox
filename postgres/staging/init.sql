@@ -10,7 +10,10 @@ CREATE TABLE IF NOT EXISTS staging.raw_batches (
     filename        TEXT NOT NULL UNIQUE,
     source          TEXT NOT NULL,
     source_url      TEXT,
-    payload         JSONB NOT NULL,
+    payload         JSONB,
+    payload_filename TEXT,
+    payload_sha256  TEXT,
+    payload_size    BIGINT,
     run_id          TEXT,
     load_mode       TEXT NOT NULL DEFAULT 'full_snapshot',
     delete_policy   TEXT NOT NULL DEFAULT 'close_on_full_snapshot',
@@ -21,6 +24,10 @@ CREATE TABLE IF NOT EXISTS staging.raw_batches (
 );
 
 ALTER TABLE staging.raw_batches ADD COLUMN IF NOT EXISTS run_id TEXT;
+ALTER TABLE staging.raw_batches ADD COLUMN IF NOT EXISTS payload_filename TEXT;
+ALTER TABLE staging.raw_batches ADD COLUMN IF NOT EXISTS payload_sha256 TEXT;
+ALTER TABLE staging.raw_batches ADD COLUMN IF NOT EXISTS payload_size BIGINT;
+ALTER TABLE staging.raw_batches ALTER COLUMN payload DROP NOT NULL;
 ALTER TABLE staging.raw_batches ADD COLUMN IF NOT EXISTS load_mode TEXT NOT NULL DEFAULT 'full_snapshot';
 ALTER TABLE staging.raw_batches ADD COLUMN IF NOT EXISTS delete_policy TEXT NOT NULL DEFAULT 'close_on_full_snapshot';
 ALTER TABLE staging.raw_batches ADD COLUMN IF NOT EXISTS checkpoint_before TEXT;

@@ -1,3 +1,4 @@
+import hashlib
 import json
 import tempfile
 import unittest
@@ -118,6 +119,12 @@ class ExtractionMetadataTests(unittest.TestCase):
         payload_file = Path(self.temp_dir.name) / result["filename"]
         combined = json.loads(payload_file.read_text())
         self.assertEqual([product["id"] for product in combined["products"]], [1, 2, 3])
+        manifest = json.loads(
+            (Path(self.temp_dir.name) / result["manifest_filename"]).read_text()
+        )
+        raw_bytes = payload_file.read_bytes()
+        self.assertEqual(manifest["byte_size"], len(raw_bytes))
+        self.assertEqual(manifest["sha256"], hashlib.sha256(raw_bytes).hexdigest())
         self.assertEqual(
             [httpx.URL(url).params.get("skip", "0") for url in requested_urls],
             ["0", "1", "2"],

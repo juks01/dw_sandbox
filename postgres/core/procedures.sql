@@ -24,7 +24,6 @@ DECLARE
     v_dept_closed bigint := 0;
     v_user_upserts bigint := 0;
     v_user_closed bigint := 0;
-    v_rowcount bigint;
 BEGIN
     IF p_load_mode IS NULL OR p_load_mode NOT IN ('full_snapshot', 'incremental_upsert') THEN
         RAISE EXCEPTION 'unsupported load mode: %', p_load_mode;
@@ -45,8 +44,7 @@ BEGIN
     WHERE p_load_mode = 'full_snapshot'
       AND p_delete_policy = 'close_on_full_snapshot' AND d.is_current
       AND NOT EXISTS (SELECT 1 FROM users_ext.department s WHERE s.department_id = d.department_id);
-    GET DIAGNOSTICS v_rowcount = ROW_COUNT;
-    v_dept_closed := v_dept_closed + v_rowcount;
+    GET DIAGNOSTICS v_dept_closed = ROW_COUNT;
 
     FOR rec IN
         SELECT s.department_id, s.code, s.name,
@@ -83,8 +81,7 @@ BEGIN
     WHERE p_load_mode = 'full_snapshot'
       AND p_delete_policy = 'close_on_full_snapshot' AND d.is_current
       AND NOT EXISTS (SELECT 1 FROM users_ext.end_user s WHERE s.user_id = d.user_id);
-    GET DIAGNOSTICS v_rowcount = ROW_COUNT;
-    v_user_closed := v_user_closed + v_rowcount;
+    GET DIAGNOSTICS v_user_closed = ROW_COUNT;
 
     FOR rec IN
         SELECT s.user_id, s.username, s.full_name, s.department_id, s.is_active,
@@ -149,6 +146,8 @@ DECLARE
     bk_expr TEXT;
     hash_expr TEXT;
     has_id BOOLEAN;
+    has_parent_key BOOLEAN;
+    v_parent_keys_complete BOOLEAN;
     sql TEXT;
     v_batch_source TEXT;
     v_batch_mode TEXT;
@@ -267,12 +266,31 @@ BEGIN
         FROM information_schema.columns
         WHERE table_schema = 'staging_ext'
           AND table_name = tbl.table_name
-          AND column_name NOT IN ('_row_id', '_source_batch_id', '_parent_id', '_row_index');
+          AND column_name NOT IN (
+              '_row_id', '_source_batch_id', '_parent_id', '_parent_key', '_row_index'
+          );
 
         SELECT EXISTS (
             SELECT 1 FROM information_schema.columns
             WHERE table_schema = 'staging_ext' AND table_name = tbl.table_name AND column_name = 'id'
         ) INTO has_id;
+        SELECT EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_schema = 'staging_ext' AND table_name = tbl.table_name
+              AND column_name IN ('_parent_key', '_row_index')
+            GROUP BY table_schema, table_name
+            HAVING count(*) = 2
+        ) INTO has_parent_key;
+        v_parent_keys_complete := false;
+        IF has_parent_key AND v_in_batch THEN
+            EXECUTE format(
+                'SELECT NOT EXISTS (
+                    SELECT 1 FROM staging_ext.%I
+                    WHERE _source_batch_id = $1 AND _parent_key IS NULL
+                )',
+                tbl.table_name
+            ) INTO v_parent_keys_complete USING p_batch_id;
+        END IF;
         hash_expr := format('md5(COALESCE((%s)::text, ''''))', data_col_list);
         normalized_keys := ARRAY(
             SELECT left(
@@ -314,6 +332,8 @@ BEGIN
                 bk_expr := 'NULL::text';
             ELSIF has_id THEN
                 bk_expr := 's.id::text';
+            ELSIF has_parent_key AND v_parent_keys_complete THEN
+                bk_expr := 'row(s._parent_key, s._row_index)::text';
             ELSE
                 RAISE EXCEPTION
                     'configured key field(s) are missing from source batch % for table %; no id column is available',
@@ -321,6 +341,8 @@ BEGIN
             END IF;
         ELSIF has_id THEN
             bk_expr := 's.id::text';
+        ELSIF has_parent_key AND v_parent_keys_complete THEN
+            bk_expr := 'row(s._parent_key, s._row_index)::text';
         ELSIF NOT v_in_batch THEN
             bk_expr := 'NULL::text';
         ELSE

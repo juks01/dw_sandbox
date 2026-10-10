@@ -1,6 +1,7 @@
 networks:
   dw:
     driver: bridge
+    name: ${DW_NETWORK_NAME:-dw-dew_dw}
 
 volumes:
   staging_data:
@@ -14,7 +15,7 @@ services:
   # PostgreSQL databases
   # ---------------------------------------------------------------------
   staging:
-    image: docker.io/library/postgres:17
+    image: docker.io/library/postgres:18
     container_name: dw-staging
     hostname: staging
     environment:
@@ -30,7 +31,7 @@ services:
       STAGING_READER_USER: ${STAGING_READER_USER}
       STAGING_READER_PASSWORD: ${STAGING_READER_PASSWORD}
     volumes:
-      - staging_data:/var/lib/postgresql/data
+      - staging_data:/var/lib/postgresql
       - ./postgres/staging:/docker-entrypoint-initdb.d:z
     ports:
       - "${STAGING_PORT}:5432"
@@ -42,7 +43,7 @@ services:
       retries: 10
 
   users:
-    image: docker.io/library/postgres:17
+    image: docker.io/library/postgres:18
     container_name: dw-users
     hostname: users
     environment:
@@ -56,7 +57,7 @@ services:
       USERS_READER_USER: ${USERS_READER_USER}
       USERS_READER_PASSWORD: ${USERS_READER_PASSWORD}
     volumes:
-      - users_data:/var/lib/postgresql/data
+      - users_data:/var/lib/postgresql
       - ./postgres/users:/docker-entrypoint-initdb.d:z
     ports:
       - "${USERS_PORT}:5432"
@@ -68,7 +69,7 @@ services:
       retries: 10
 
   core:
-    image: docker.io/library/postgres:17
+    image: docker.io/library/postgres:18
     container_name: dw-core
     hostname: core
     environment:
@@ -90,7 +91,7 @@ services:
       STAGING_DB: ${STAGING_DB}
       USERS_DB: ${USERS_DB}
     volumes:
-      - core_data:/var/lib/postgresql/data
+      - core_data:/var/lib/postgresql
       - ./postgres/core:/docker-entrypoint-initdb.d:z
     ports:
       - "${CORE_PORT}:5432"
@@ -107,7 +108,7 @@ services:
       retries: 10
 
   mart:
-    image: docker.io/library/postgres:17
+    image: docker.io/library/postgres:18
     container_name: dw-mart
     hostname: mart
     environment:
@@ -126,7 +127,7 @@ services:
       CORE_READER_PASSWORD: ${CORE_READER_PASSWORD}
       CORE_DB: ${CORE_DB}
     volumes:
-      - mart_data:/var/lib/postgresql/data
+      - mart_data:/var/lib/postgresql
       - ./postgres/mart:/docker-entrypoint-initdb.d:z
     ports:
       - "${MART_PORT}:5432"
@@ -151,9 +152,11 @@ services:
     environment:
       TZ: ${TZ}
       EXTRACTOR_USER_AGENT: ${EXTRACTOR_USER_AGENT}
+      ALLOWED_HOSTS_PATH: /config/allowed_hosts
       LANDING_DIR: /landing
     volumes:
       - ./data/landing:/landing:z
+      - ./extractor/conf/allowed_hosts:/config/allowed_hosts:ro,z
     networks: [dw]
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://localhost:8000/health',timeout=30)"]
@@ -196,6 +199,7 @@ services:
       ORCH_USER: ${ORCH_USER}
       ORCH_PASSWORD: ${ORCH_PASSWORD}
       ORCH_SQLITE_PATH: ${ORCH_SQLITE_PATH}
+      ORCH_PIPELINE_REQUEST_TIMEOUT_SECONDS: ${ORCH_PIPELINE_REQUEST_TIMEOUT_SECONDS:-900}
       ALLOWED_HOSTS_PATH: /config/allowed_hosts
       ORCH_SCHEDULER_INTERVAL_SECONDS: ${ORCH_SCHEDULER_INTERVAL_SECONDS}
       EXTRACTOR_URL: ${EXTRACTOR_URL}
@@ -205,6 +209,10 @@ services:
       STAGING_DB: ${STAGING_DB}
       STAGING_READER_USER: ${STAGING_READER_USER}
       STAGING_READER_PASSWORD: ${STAGING_READER_PASSWORD}
+      USERS_HOST: ${USERS_HOST}
+      USERS_DB: ${USERS_DB}
+      USERS_READER_USER: ${USERS_READER_USER}
+      USERS_READER_PASSWORD: ${USERS_READER_PASSWORD}
       CORE_HOST: ${CORE_HOST}
       CORE_PORT: ${CORE_PORT}
       CORE_DB: ${CORE_DB}

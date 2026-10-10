@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-import functools
-import hashlib
 import json
 import os
+from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Literal, Optional
 
@@ -12,16 +12,18 @@ from pydantic import BaseModel
 
 from . import db
 from .access_log import install_health_access_log_filter
-from .flatten import flatten_payload
+from .flatten import inspect_payload
 
 LANDING_DIR = Path(os.environ.get("LANDING_DIR", "/landing"))
 
-app = FastAPI(title="dw-dev loader")
 
-
-@app.on_event("startup")
-async def configure_access_logging() -> None:
+@asynccontextmanager
+async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
     install_health_access_log_filter()
+    yield
+
+
+app = FastAPI(title="dw-dev loader", lifespan=lifespan)
 
 
 class LoadRequest(BaseModel):
@@ -46,7 +48,7 @@ def health() -> dict:
 
 @app.post("/load")
 def load(req: LoadRequest) -> dict:
-    """Validate the extraction manifest before recording its payload as one batch."""
+    """Validate the extraction manifest before streaming its payload into staging."""
     req_filename = Path(req.filename)
 
     if req_filename.name != req.filename:
@@ -69,9 +71,8 @@ def load(req: LoadRequest) -> dict:
         raise HTTPException(status_code=409, detail=f"landing manifest not found: {manifest_filename}")
 
     try:
-        raw_text = file_path.read_text(encoding="utf-8")
-        payload = json.loads(raw_text)
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        payload_info = inspect_payload(file_path)
+    except (UnicodeDecodeError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=f"invalid JSON in {req.filename}: {exc}") from exc
 
     try:
@@ -98,22 +99,26 @@ def load(req: LoadRequest) -> dict:
         if requested != manifested:
             raise HTTPException(status_code=409, detail=f"{field} does not match extraction manifest")
     expected_sha256 = manifest.get("sha256")
-    actual_sha256 = hashlib.sha256(file_path.read_bytes()).hexdigest()
     # Reject altered or mismatched landing files before any staging writes occur.
-    if expected_sha256 != actual_sha256:
+    if expected_sha256 != payload_info.sha256:
         raise HTTPException(status_code=409, detail="landing payload checksum does not match manifest")
+    expected_size = manifest.get("byte_size")
+    if expected_size is not None and expected_size != payload_info.byte_size:
+        raise HTTPException(status_code=409, detail="landing payload size does not match manifest")
 
     source = req.source or manifest.get("source") or req.filename.split("_")[0]
     source_url = req.source_url or manifest.get("requested_url")
 
     try:
-        flatten_fn = functools.partial(flatten_payload, source, payload)
         result = db.load_payload(
             req.filename,
             source,
             source_url,
-            payload,
-            flatten_fn,
+            file_path,
+            payload_info.sha256,
+            payload_info.byte_size,
+            payload_info.root_type,
+            payload_info.collection_key,
             req.load_mode,
             delete_policy,
             req.run_id or manifest.get("run_id"),

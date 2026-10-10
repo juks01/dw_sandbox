@@ -128,12 +128,7 @@ def list_sources() -> list[dict]:
             ORDER BY s.id
             """
         ).fetchall()
-        result = []
-        for row in rows:
-            source = dict(row)
-            source["key_fields"] = json.loads(source["key_fields"])
-            result.append(source)
-        return result
+        return [_source_dict(row) for row in rows]
 
 
 def get_source(source_id: int) -> Optional[dict]:
@@ -148,9 +143,7 @@ def get_source_by_name(name: str) -> Optional[dict]:
         return _source_dict(row) if row else None
 
 
-def _source_dict(row: Optional[sqlite3.Row]) -> Optional[dict]:
-    if row is None:
-        return None
+def _source_dict(row: sqlite3.Row) -> dict:
     source = dict(row)
     source["key_fields"] = json.loads(source["key_fields"])
     return source

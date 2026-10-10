@@ -7,13 +7,14 @@ through psycopg.sql.Identifier() -- never string-concatenated.
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from typing import Any, Optional
 
 import psycopg
 from psycopg import sql
 from psycopg.types.json import Json
 
-from .flatten import TECHNICAL_COLUMNS
+from .flatten import TECHNICAL_COLUMNS, iter_flattened_batches
 
 STAGING_HOST = os.environ.get("STAGING_HOST", "staging")
 STAGING_PORT = int(os.environ.get("STAGING_PORT", "5432"))
@@ -53,7 +54,8 @@ def health_check() -> bool:
 
 def insert_raw_batch(
     cur: psycopg.Cursor, filename: str, source: str, source_url: Optional[str],
-    payload: Any, load_mode: str, delete_policy: str, run_id: Optional[str],
+    payload_sha256: str, payload_size: int, load_mode: str, delete_policy: str,
+    run_id: Optional[str],
     checkpoint_before: Optional[str], checkpoint_after: Optional[str],
     pagination_complete: bool,
 ) -> tuple[int, bool, list[str]]:
@@ -61,14 +63,18 @@ def insert_raw_batch(
     cur.execute(
         """
         INSERT INTO staging.raw_batches
-            (filename, source, source_url, payload, run_id, load_mode, delete_policy,
-             checkpoint_before, checkpoint_after, pagination_complete)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            (filename, source, source_url, payload, payload_filename, payload_sha256,
+             payload_size, run_id, load_mode, delete_policy, checkpoint_before,
+             checkpoint_after, pagination_complete)
+        VALUES (%s, %s, %s, NULL, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         ON CONFLICT (filename) DO NOTHING
         RETURNING id
         """,
-        (filename, source, source_url, Json(payload), run_id, load_mode, delete_policy,
-         checkpoint_before, checkpoint_after, pagination_complete),
+        (
+            filename, source, source_url, filename, payload_sha256, payload_size,
+            run_id, load_mode, delete_policy, checkpoint_before, checkpoint_after,
+            pagination_complete,
+        ),
     )
     row = cur.fetchone()
     if row:
@@ -103,10 +109,16 @@ def ensure_table(cur: psycopg.Cursor, table_name: str) -> None:
                 _row_id UUID PRIMARY KEY,
                 _source_batch_id BIGINT NOT NULL REFERENCES staging.raw_batches(id),
                 _parent_id UUID,
+                _parent_key TEXT,
                 _row_index INTEGER NOT NULL DEFAULT 0
             )
             """
         ).format(tbl=sql.Identifier(table_name))
+    )
+    cur.execute(
+        sql.SQL("ALTER TABLE staging.{tbl} ADD COLUMN IF NOT EXISTS _parent_key TEXT").format(
+            tbl=sql.Identifier(table_name)
+        )
     )
     cur.execute(
         sql.SQL("GRANT SELECT, INSERT, UPDATE ON staging.{tbl} TO loader_writer").format(
@@ -154,13 +166,7 @@ def ensure_columns(cur: psycopg.Cursor, table_name: str, rows: list[dict]) -> No
 def insert_rows(cur: psycopg.Cursor, table_name: str, rows: list[dict]) -> int:
     if not rows:
         return 0
-    all_cols: list[str] = []
-    seen_cols = set()
-    for row in rows:
-        for c in row.keys():
-            if c not in seen_cols:
-                seen_cols.add(c)
-                all_cols.append(c)
+    all_cols = list(dict.fromkeys(col for row in rows for col in row))
 
     col_idents = sql.SQL(", ").join(sql.Identifier(c) for c in all_cols)
     placeholders = sql.SQL(", ").join(sql.Placeholder() for _ in all_cols)
@@ -168,29 +174,27 @@ def insert_rows(cur: psycopg.Cursor, table_name: str, rows: list[dict]) -> int:
         "INSERT INTO staging.{tbl} ({cols}) VALUES ({vals}) ON CONFLICT (_row_id) DO NOTHING"
     ).format(tbl=sql.Identifier(table_name), cols=col_idents, vals=placeholders)
 
-    count = 0
-    for row in rows:
-        values = [row.get(c) for c in all_cols]
-        cur.execute(insert_sql, values)
-        count += 1
-    return count
+    cur.executemany(
+        insert_sql,
+        ([row.get(col) for col in all_cols] for row in rows),
+    )
+    return len(rows)
 
 
 def load_payload(
-    filename: str, source: str, source_url: Optional[str], payload: Any,
-    flatten_fn, load_mode: str, delete_policy: str, run_id: Optional[str],
+    filename: str, source: str, source_url: Optional[str], payload_path: Path,
+    payload_sha256: str, payload_size: int, root_type: str,
+    collection_key: Optional[str], load_mode: str, delete_policy: str, run_id: Optional[str],
     checkpoint_before: Optional[str], checkpoint_after: Optional[str],
     pagination_complete: bool,
 ) -> dict[str, Any]:
-    """flatten_fn(batch_id) -> {table_name: [row, ...]}. Flattening happens
-    AFTER the batch id is known so every row can carry the real
-    _source_batch_id, all inside the same transaction as the raw_batches
-    insert (idempotency + consistency)."""
+    """Stream bounded row groups into one atomic staging batch."""
     with get_conn() as conn:
         with conn.cursor() as cur:
             batch_id, is_new, existing_tables = insert_raw_batch(
-                cur, filename, source, source_url, payload, load_mode, delete_policy, run_id,
-                checkpoint_before, checkpoint_after, pagination_complete,
+                cur, filename, source, source_url, payload_sha256, payload_size,
+                load_mode, delete_policy, run_id, checkpoint_before, checkpoint_after,
+                pagination_complete,
             )
             if not is_new:
                 return {
@@ -200,17 +204,23 @@ def load_payload(
                     "tables": {name: 0 for name in existing_tables},
                 }
 
-            tables = flatten_fn(batch_id)
-
             summary: dict[str, int] = {}
-            for table_name, rows in tables.items():
-                ensure_table(cur, table_name)
-                ensure_columns(cur, table_name, rows)
-                inserted = insert_rows(cur, table_name, rows)
-                summary[table_name] = inserted
+            initialized_tables: set[str] = set()
+            table_names: list[str] = []
+            for tables in iter_flattened_batches(
+                source, payload_path, batch_id, root_type, collection_key,
+            ):
+                for table_name, rows in tables.items():
+                    if table_name not in initialized_tables:
+                        ensure_table(cur, table_name)
+                        initialized_tables.add(table_name)
+                        table_names.append(table_name)
+                    ensure_columns(cur, table_name, rows)
+                    inserted = insert_rows(cur, table_name, rows)
+                    summary[table_name] = summary.get(table_name, 0) + inserted
             cur.execute(
                 "UPDATE staging.raw_batches SET table_names = %s WHERE id = %s",
-                (Json(list(tables)), batch_id),
+                (Json(table_names), batch_id),
             )
 
         conn.commit()
