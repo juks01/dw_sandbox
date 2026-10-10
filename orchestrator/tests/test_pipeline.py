@@ -77,6 +77,34 @@ class PipelineCheckpointTests(unittest.TestCase):
         self.assertEqual(self.extract_request["checkpoint_before"], self.checkpoint_before)
         self.assertEqual(self.extract_request["load_mode"], "incremental_upsert")
 
+    def test_large_payload_stage_requests_use_configured_timeout(self):
+        requests = []
+
+        def responses(url, **kwargs):
+            requests.append((url, kwargs))
+            return self._responses(url, **kwargs)
+
+        with (
+            patch.object(pipeline, "health_status", return_value={
+                "dependencies": {
+                    "extractor": True, "loader": True, "staging": True,
+                    "users": True, "core": True, "mart": True,
+                },
+            }),
+            patch.object(pipeline.httpx, "post", side_effect=responses),
+            patch.object(pipeline, "call_core_sync", return_value=[
+                {"source_table": "items", "dim_table": "dim_items"},
+            ]),
+            patch.object(pipeline, "call_mart_refresh", return_value=[]),
+        ):
+            pipeline.run_pipeline_steps(self.source, self.run_id)
+
+        self.assertEqual(
+            [kwargs["timeout"] for _, kwargs in requests],
+            [pipeline.PIPELINE_REQUEST_TIMEOUT_SECONDS] * 2,
+        )
+        self.assertEqual(pipeline.PIPELINE_REQUEST_TIMEOUT_SECONDS, 900)
+
     def test_mart_failure_keeps_previous_checkpoint_for_retry(self):
         def fail_refresh(expected):
             raise pipeline.PipelineError("mart", "refresh failed")

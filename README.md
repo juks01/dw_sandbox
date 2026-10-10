@@ -13,6 +13,12 @@ The local stack runs the extractor, loader, orchestrator, staging, core, and
 mart services. Sources can be configured for full snapshots or incremental
 upserts.
 
+The standalone mock source (generator, source database and sample API) is
+maintained separately from the warehouse services. See
+[mock_source/README.md](./mock_source/README.md). The future reporting UI
+should likewise live as an independent application, with read-only access to
+the mart database; it is not part of the orchestrator GUI.
+
 Each extraction writes a readable payload filename and a matching manifest:
 
 ```
@@ -26,6 +32,14 @@ HTTP status, content type, byte size, SHA-256 checksum, load mode, checkpoint
 before/after, and whether pagination appears complete. The loader only loads
 a payload when its manifest exists, names the same payload, and contains a
 matching checksum. Both files are written atomically by the extractor.
+
+The extractor writes paginated results to the landing file as each API page
+arrives; it does not keep the complete result set in memory. The loader
+validates and flattens the landing JSON in batches of 500 top-level records
+inside one Staging transaction. `staging.raw_batches` stores the landing
+filename, checksum and size instead of duplicating the full JSON document in
+its `payload` column. Keep the landing files for as long as batch-level raw
+data is needed for audit or replay.
 ## First
 Copy .env file template as .env file. You may use default values in dev. NEVER use default values in production!
 ```bash
@@ -46,13 +60,27 @@ extractor may contact. It follows `Link` headers with `rel="next"`, JSON
 `next` URLs, DummyJSON-style `total`/`skip`/`limit` metadata, and `has_more`
 page-number responses, combining result lists before loading. Every page and
 redirect is checked against the allowlist; unknown or incomplete pagination
-fails closed.
+fails closed. Result pages are appended to the landing file as they are
+fetched, keeping Extractor memory bounded to the current API page.
 
 ## Delete environment
 ```bash
 podman compose down --remove-orphans -v
 ```
-Don't use -v if you want to keep database volumes
+Don't use `-v` if you want to keep warehouse database volumes. The mock
+source is a separate Compose project; to stop it or remove its data, follow
+the lifecycle commands in [mock_source/README.md](./mock_source/README.md).
+
+## PostgreSQL 18 volume migration
+
+The PostgreSQL containers now use version 18. Its official image stores data
+under `/var/lib/postgresql/18/docker`, and the Compose volumes are mounted at
+`/var/lib/postgresql` to match. Existing volumes created with PostgreSQL 17
+are not automatically upgraded or read as PostgreSQL 18 databases. Before
+starting the new images, back up any PostgreSQL 17 data you need and migrate
+it with a PostgreSQL major-version upgrade procedure (`pg_upgrade` or
+dump/restore). Do not use `down -v` unless you intend to permanently delete
+those existing databases.
 
 ## GUI
 http://localhost:8080  (HTTP Basic Auth — see `ORCH_USER` / `ORCH_PASSWORD`
@@ -65,6 +93,26 @@ watermark field. Key fields are optional only when returned records contain an
 `id` column, which is used automatically. Otherwise, configure stable key fields;
 rows without either are rejected. Content hashes are still used to detect SCD2
 changes, but never as business keys because they change when row content changes.
+Nested-array rows without their own `id` use their stable parent key and array
+position as a composite key when the parent has an `id`.
+
+When applying database changes to an existing local stack, reapply the
+Staging schema and procedure SQL files; the PostgreSQL init scripts only run
+automatically on a new database volume. Apply the Staging schema migration
+before rebuilding or starting the new Loader:
+
+```bash
+podman compose exec -T staging sh -c \
+  'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -f /docker-entrypoint-initdb.d/init.sql'
+podman compose exec -T core sh -c \
+  'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -f /docker-entrypoint-initdb.d/procedures.sql'
+podman compose exec -T mart sh -c \
+  'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -f /docker-entrypoint-initdb.d/procedures.sql'
+podman compose up -d --build extractor loader
+```
+
+Run the affected source again after applying the changes so its rows are
+reloaded with the stable parent keys.
 Incremental sources use `updated_since` and `updated_at` by default; a
 timestamp-based source's first run is always a full snapshot. The source API
 must actually honor the configured query parameter to return a delta;

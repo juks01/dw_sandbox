@@ -41,7 +41,10 @@ BEGIN
         INTO col_list
         FROM information_schema.columns
         WHERE table_schema = 'core_ext' AND table_name = tbl.table_name
-          AND column_name NOT IN ('_sk', 'valid_from', 'valid_to', 'is_current', '_content_hash', '_business_key');
+          AND column_name NOT IN (
+              '_sk', 'valid_from', 'valid_to', 'is_current',
+              '_content_hash', '_business_key', '_parent_key'
+          );
 
         IF col_list IS NULL THEN
             CONTINUE;

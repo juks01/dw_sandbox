@@ -289,10 +289,22 @@ class ExtractorToMartTests(unittest.TestCase):
         with self.psycopg.connect(**self.staging_admin) as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    "SELECT payload FROM staging.raw_batches WHERE filename = ANY(%s) ORDER BY id",
+                    "SELECT payload_filename, payload_sha256, payload_size, payload "
+                    "FROM staging.raw_batches WHERE filename = ANY(%s) ORDER BY id",
                     (self.filenames,),
                 )
-                self.assertEqual(cur.fetchall(), [(payload,) for payload in self.payloads])
+                self.assertEqual(
+                    cur.fetchall(),
+                    [
+                        (
+                            filename,
+                            manifest["sha256"],
+                            manifest["byte_size"],
+                            None,
+                        )
+                        for filename, manifest in zip(self.filenames, self.manifests)
+                    ],
+                )
 
     def test_scd2_closes_old_version_and_keeps_current(self):
         query = self.sql.SQL(
@@ -406,6 +418,7 @@ class ExtractorToMartTests(unittest.TestCase):
                     "id": 9910301,
                     "name": "Nested API object",
                     "profile": {"region": "north", "verified": True},
+                    "attributes": {"labels": ["priority", "customer"]},
                     "tags": [
                         {"id": 9910302, "value": "priority"},
                         {"id": 9910303, "value": "customer"},
@@ -479,21 +492,6 @@ class ExtractorToMartTests(unittest.TestCase):
                     loaded = load_response.json()
                     table_names.update(loaded["tables"])
                     created.append((source, table_names))
-
-                    if case_name == "dummyjson-products":
-                        with self.assertRaisesRegex(
-                            self.psycopg.Error, "no id column is available"
-                        ):
-                            with self.psycopg.connect(**self.core_service) as conn:
-                                with conn.cursor() as cur:
-                                    cur.execute(
-                                        "SELECT * FROM core.sync_from_staging(%s, %s, %s, %s, %s)",
-                                        (
-                                            loaded["batch_id"], source, "full_snapshot",
-                                            "close_on_full_snapshot", ["id"],
-                                        ),
-                                    )
-                        continue
 
                     with self.psycopg.connect(**self.core_service) as conn:
                         with conn.cursor() as cur:
@@ -569,6 +567,7 @@ class ExtractorToMartTests(unittest.TestCase):
                     else:
                         tags_table = f"{root_table}_tags"
                         orders_table = f"{root_table}_orders"
+                        labels_table = f"{root_table}_attributes_labels"
                         with self.psycopg.connect(**self.reporting) as conn:
                             with conn.cursor() as cur:
                                 cur.execute(
@@ -580,6 +579,12 @@ class ExtractorToMartTests(unittest.TestCase):
                                 self.assertEqual(cur.fetchall(), [
                                     (9910301, "Nested API object", "north", True),
                                 ])
+                                cur.execute(
+                                    self.sql.SQL(
+                                        "SELECT value FROM mart.{} ORDER BY _row_index"
+                                    ).format(self.sql.Identifier(labels_table))
+                                )
+                                self.assertEqual(cur.fetchall(), [("priority",), ("customer",)])
                                 cur.execute(
                                     self.sql.SQL("SELECT value FROM mart.{} ORDER BY _row_index").format(
                                         self.sql.Identifier(tags_table),

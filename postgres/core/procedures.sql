@@ -146,6 +146,8 @@ DECLARE
     bk_expr TEXT;
     hash_expr TEXT;
     has_id BOOLEAN;
+    has_parent_key BOOLEAN;
+    v_parent_keys_complete BOOLEAN;
     sql TEXT;
     v_batch_source TEXT;
     v_batch_mode TEXT;
@@ -264,12 +266,31 @@ BEGIN
         FROM information_schema.columns
         WHERE table_schema = 'staging_ext'
           AND table_name = tbl.table_name
-          AND column_name NOT IN ('_row_id', '_source_batch_id', '_parent_id', '_row_index');
+          AND column_name NOT IN (
+              '_row_id', '_source_batch_id', '_parent_id', '_parent_key', '_row_index'
+          );
 
         SELECT EXISTS (
             SELECT 1 FROM information_schema.columns
             WHERE table_schema = 'staging_ext' AND table_name = tbl.table_name AND column_name = 'id'
         ) INTO has_id;
+        SELECT EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_schema = 'staging_ext' AND table_name = tbl.table_name
+              AND column_name IN ('_parent_key', '_row_index')
+            GROUP BY table_schema, table_name
+            HAVING count(*) = 2
+        ) INTO has_parent_key;
+        v_parent_keys_complete := false;
+        IF has_parent_key AND v_in_batch THEN
+            EXECUTE format(
+                'SELECT NOT EXISTS (
+                    SELECT 1 FROM staging_ext.%I
+                    WHERE _source_batch_id = $1 AND _parent_key IS NULL
+                )',
+                tbl.table_name
+            ) INTO v_parent_keys_complete USING p_batch_id;
+        END IF;
         hash_expr := format('md5(COALESCE((%s)::text, ''''))', data_col_list);
         normalized_keys := ARRAY(
             SELECT left(
@@ -311,6 +332,8 @@ BEGIN
                 bk_expr := 'NULL::text';
             ELSIF has_id THEN
                 bk_expr := 's.id::text';
+            ELSIF has_parent_key AND v_parent_keys_complete THEN
+                bk_expr := 'row(s._parent_key, s._row_index)::text';
             ELSE
                 RAISE EXCEPTION
                     'configured key field(s) are missing from source batch % for table %; no id column is available',
@@ -318,6 +341,8 @@ BEGIN
             END IF;
         ELSIF has_id THEN
             bk_expr := 's.id::text';
+        ELSIF has_parent_key AND v_parent_keys_complete THEN
+            bk_expr := 'row(s._parent_key, s._row_index)::text';
         ELSIF NOT v_in_batch THEN
             bk_expr := 'NULL::text';
         ELSE
