@@ -31,6 +31,7 @@ class LoadManifestMetadataTests(unittest.TestCase):
             "checkpoint_after": "2026-10-01T11:00:00+00:00",
             "pagination_complete": True,
             "sha256": hashlib.sha256(raw).hexdigest(),
+            "byte_size": len(raw),
         }
         (Path(self.temp_dir.name) / "items.manifest.json").write_text(json.dumps(manifest))
         result = {"status": "loaded", "batch_id": 12, "tables": {"items": 1}}
@@ -50,8 +51,12 @@ class LoadManifestMetadataTests(unittest.TestCase):
 
         self.assertEqual(response["batch_id"], 12)
         args = load_payload.call_args.args
-        self.assertEqual(args[1:4], ("items", manifest["requested_url"], payload))
-        self.assertEqual(args[5:], (
+        self.assertEqual(args[1:3], ("items", manifest["requested_url"]))
+        self.assertEqual(args[3], Path(self.temp_dir.name) / "items.json")
+        self.assertEqual(args[4:8], (
+            manifest["sha256"], len(raw), "array", None,
+        ))
+        self.assertEqual(args[8:], (
             "incremental_upsert", "never_close", "run-12",
             manifest["checkpoint_before"], manifest["checkpoint_after"], True,
         ))

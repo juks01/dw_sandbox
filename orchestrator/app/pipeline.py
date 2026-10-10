@@ -26,6 +26,11 @@ HEALTH_CHECK_INTERVAL_SECONDS = 5
 
 EXTRACTOR_URL = os.environ.get("EXTRACTOR_URL", "http://extractor:8000")
 LOADER_URL = os.environ.get("LOADER_URL", "http://loader:8000")
+PIPELINE_REQUEST_TIMEOUT_SECONDS = float(
+    os.environ.get("ORCH_PIPELINE_REQUEST_TIMEOUT_SECONDS", "900")
+)
+if PIPELINE_REQUEST_TIMEOUT_SECONDS <= 0:
+    raise ValueError("ORCH_PIPELINE_REQUEST_TIMEOUT_SECONDS must be positive")
 
 STAGING_HOST = os.environ.get("STAGING_HOST", "staging")
 STAGING_PORT = 5432
@@ -309,7 +314,7 @@ def run_pipeline_steps(source: dict, run_id: int, force_full: bool = False) -> N
                     source["load_mode"] == "incremental_upsert" and bool(watermark_field)
                 ),
             },
-            timeout=60.0,
+            timeout=PIPELINE_REQUEST_TIMEOUT_SECONDS,
         )
         resp.raise_for_status()
         extract_result = resp.json()
@@ -345,7 +350,7 @@ def run_pipeline_steps(source: dict, run_id: int, force_full: bool = False) -> N
                 "checkpoint_after": checkpoint_after,
                 "pagination_complete": True,
             },
-            timeout=60.0,
+            timeout=PIPELINE_REQUEST_TIMEOUT_SECONDS,
         )
         resp.raise_for_status()
         load_result = resp.json()

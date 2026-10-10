@@ -187,22 +187,6 @@ def _next_page_url(payload: Any, response: httpx.Response) -> Optional[str]:
     return None
 
 
-def _merge_page_payload(aggregate: Any, page: Any) -> Any:
-    aggregate_key, aggregate_items = _page_collection(aggregate)
-    page_key, page_items = _page_collection(page)
-    if aggregate_items is None or page_items is None or aggregate_key != page_key:
-        raise HTTPException(
-            status_code=502,
-            detail="cannot combine paginated responses with different result shapes",
-        )
-    aggregate_items.extend(page_items)
-    if isinstance(aggregate, dict) and isinstance(page, dict):
-        for key, value in page.items():
-            if key != aggregate_key:
-                aggregate[key] = value
-    return aggregate
-
-
 def _get_http_page(url: str) -> httpx.Response:
     current_url = url
     try:
@@ -253,7 +237,7 @@ def health() -> dict[str, str]:
 
 @app.post("/extract", response_model=ExtractResponse)
 def extract(req: ExtractRequest) -> ExtractResponse:
-    """Fetch every supported page and atomically publish payload plus manifest."""
+    """Fetch pages and atomically publish the combined payload plus manifest."""
     if not req.source.strip():
         raise HTTPException(status_code=400, detail="source is required")
 
@@ -276,6 +260,8 @@ def extract(req: ExtractRequest) -> ExtractResponse:
     if not is_allowed_url(req.url):
         raise HTTPException(status_code=403, detail="url host is not allowed by extractor allowlist")
 
+    LANDING_DIR.mkdir(parents=True, exist_ok=True)
+    raw_bytes: Optional[bytes] = None
     if req.url.strip().lower() == "local://demo":
         try:
             raw_bytes = DEMO_PAYLOAD_PATH.read_bytes()
@@ -285,6 +271,34 @@ def extract(req: ExtractRequest) -> ExtractResponse:
         http_status = 200
         content_type = "application/json"
         page_count = 1
+        try:
+            last_page_payload = json.loads(raw_bytes)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise HTTPException(status_code=500, detail="offline demo payload is invalid JSON") from exc
+        pagination_complete = _pagination_complete(last_page_payload)
+        item_count = len(last_page_payload) if isinstance(last_page_payload, list) else 1
+        payload_temp_path = None
+        checkpoint_after = None
+        if req.watermark_required or (
+            req.load_mode == "incremental_upsert" and uses_watermark
+        ):
+            try:
+                checkpoint_after = _checkpoint_after(
+                    last_page_payload, req.watermark_field, req.checkpoint_before,
+                )
+            except ValueError as exc:
+                raise HTTPException(status_code=502, detail=str(exc)) from exc
+            if (
+                checkpoint_after is None
+                and req.checkpoint_before
+                and (item_count == 0 or _empty_payload(last_page_payload))
+            ):
+                checkpoint_after = req.checkpoint_before
+            if checkpoint_after is None:
+                raise HTTPException(
+                    status_code=502,
+                    detail=f"response contains no usable watermark field {req.watermark_field!r}",
+                )
     else:
         current_url = req.url
         if req.load_mode == "incremental_upsert" and uses_watermark:
@@ -294,42 +308,153 @@ def extract(req: ExtractRequest) -> ExtractResponse:
                 )
             )
         seen_urls: set[str] = set()
-        aggregate = None
         page_count = 0
-        while True:
-            if current_url in seen_urls:
-                raise HTTPException(status_code=502, detail="pagination returned a repeated URL")
-            seen_urls.add(current_url)
-            resp = _get_http_page(current_url)
-            try:
-                page_payload = resp.json()
-            except ValueError as exc:
-                raise HTTPException(status_code=502, detail="upstream response is not valid JSON") from exc
+        output = None
+        payload_temp_path = None
+        collection_key = None
+        root_array = False
+        last_metadata: dict[str, Any] = {}
+        last_page_empty = False
+        pagination_complete = True
+        item_count = 0
+        checkpoint_after = None
+        try:
+            while True:
+                last_metadata = {}
+                if current_url in seen_urls:
+                    raise HTTPException(status_code=502, detail="pagination returned a repeated URL")
+                seen_urls.add(current_url)
+                resp = _get_http_page(current_url)
+                try:
+                    page_payload = resp.json()
+                except ValueError as exc:
+                    raise HTTPException(status_code=502, detail="upstream response is not valid JSON") from exc
 
-            if aggregate is None:
-                aggregate = page_payload
-            else:
-                # Keep paginated rows together so downstream stages see one complete source batch.
-                aggregate = _merge_page_payload(aggregate, page_payload)
-            page_count += 1
-            final_url = str(resp.url)
-            http_status = resp.status_code
-            content_type = resp.headers.get("content-type")
+                page_count += 1
+                final_url = str(resp.url)
+                http_status = resp.status_code
+                content_type = resp.headers.get("content-type")
+                page_key, page_items = _page_collection(page_payload)
+                page_is_array = isinstance(page_payload, list)
 
-            next_url = _next_page_url(page_payload, resp)
-            if not next_url:
-                break
-            if page_count >= MAX_PAGINATION_PAGES:
-                raise HTTPException(
-                    status_code=502,
-                    detail=f"pagination exceeded the {MAX_PAGINATION_PAGES}-page safety limit",
-                )
-            current_url = next_url
+                if page_items is None:
+                    if page_count > 1 or output is not None:
+                        raise HTTPException(
+                            status_code=502,
+                            detail="cannot combine paginated responses with different result shapes",
+                        )
+                    raw_bytes = resp.content
+                    item_count = 1
+                else:
+                    if output is None:
+                        temp = tempfile.NamedTemporaryFile(
+                            mode="w",
+                            encoding="utf-8",
+                            dir=LANDING_DIR,
+                            prefix=".extract-",
+                            delete=False,
+                        )
+                        output = temp
+                        payload_temp_path = Path(temp.name)
+                        root_array = page_is_array
+                        collection_key = page_key
+                        if root_array:
+                            output.write("[")
+                        else:
+                            output.write(
+                                "{"
+                                + json.dumps(collection_key, ensure_ascii=False)
+                                + ":["
+                            )
+                    elif page_key != collection_key or page_is_array != root_array:
+                        raise HTTPException(
+                            status_code=502,
+                            detail="cannot combine paginated responses with different result shapes",
+                        )
 
-        if page_count == 1:
-            raw_bytes = resp.content
-        else:
-            raw_bytes = json.dumps(aggregate, ensure_ascii=False).encode("utf-8")
+                    for item in page_items:
+                        if item_count:
+                            output.write(",")
+                        json.dump(item, output, ensure_ascii=False, separators=(",", ":"))
+                        item_count += 1
+                    if isinstance(page_payload, dict):
+                        last_metadata = {
+                            key: value for key, value in page_payload.items()
+                            if key != collection_key
+                        }
+
+                if req.watermark_required or (
+                    req.load_mode == "incremental_upsert" and uses_watermark
+                ):
+                    try:
+                        page_checkpoint = _checkpoint_after(
+                            page_payload, req.watermark_field, req.checkpoint_before,
+                        )
+                    except ValueError as exc:
+                        raise HTTPException(status_code=502, detail=str(exc)) from exc
+                    if page_checkpoint and (
+                        checkpoint_after is None or page_checkpoint > checkpoint_after
+                    ):
+                        checkpoint_after = page_checkpoint
+
+                last_page_empty = _empty_payload(page_payload)
+                pagination_complete = _pagination_complete(page_payload)
+                next_url = _next_page_url(page_payload, resp)
+                if not next_url:
+                    break
+                if page_items is None:
+                    raise HTTPException(
+                        status_code=502,
+                        detail="cannot combine paginated responses with different result shapes",
+                    )
+                if page_count >= MAX_PAGINATION_PAGES:
+                    raise HTTPException(
+                        status_code=502,
+                        detail=f"pagination exceeded the {MAX_PAGINATION_PAGES}-page safety limit",
+                    )
+                current_url = next_url
+                del page_items, page_payload, resp
+
+            if output is not None:
+                output.write("]")
+                if not root_array:
+                    for key, value in last_metadata.items():
+                        output.write(",")
+                        json.dump(key, output, ensure_ascii=False)
+                        output.write(":")
+                        json.dump(value, output, ensure_ascii=False, separators=(",", ":"))
+                    output.write("}")
+                output.flush()
+                os.fsync(output.fileno())
+                output.close()
+                output = None
+        except Exception:
+            if output is not None:
+                output.close()
+            if payload_temp_path is not None:
+                payload_temp_path.unlink(missing_ok=True)
+            raise
+
+        if (
+            checkpoint_after is None
+            and req.load_mode == "incremental_upsert"
+            and req.checkpoint_before
+            and (
+                item_count == 0
+                or (page_count == 1 and last_page_empty)
+            )
+        ):
+            checkpoint_after = req.checkpoint_before
+        if (
+            (req.watermark_required or (req.load_mode == "incremental_upsert" and uses_watermark))
+            and checkpoint_after is None
+        ):
+            if payload_temp_path is not None:
+                payload_temp_path.unlink(missing_ok=True)
+            raise HTTPException(
+                status_code=502,
+                detail=f"response contains no usable watermark field {req.watermark_field!r}",
+            )
 
     ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%f")[:-3] + "Z"
     file_uuid = str(uuid.uuid4())
@@ -341,37 +466,23 @@ def extract(req: ExtractRequest) -> ExtractResponse:
     dest = LANDING_DIR / filename
     manifest_dest = LANDING_DIR / manifest_filename
 
-    # Validate it's actually JSON before writing (payload must stay as
-    # unmodified as possible, but we do want to fail fast on garbage).
-    try:
-        payload = json.loads(raw_bytes)
-    except json.JSONDecodeError as exc:
-        raise HTTPException(status_code=502, detail=f"upstream response is not valid JSON: {exc}") from exc
-
     fetched_at = datetime.now(timezone.utc).isoformat()
-    checkpoint_after = None
-    if req.watermark_required or (
-        req.load_mode == "incremental_upsert" and uses_watermark
-    ):
+    if raw_bytes is not None:
         try:
-            checkpoint_after = _checkpoint_after(
-                payload, req.watermark_field, req.checkpoint_before,
-            )
-        except ValueError as exc:
-            raise HTTPException(status_code=502, detail=str(exc)) from exc
-        if (
-            checkpoint_after is None
-            and req.load_mode == "incremental_upsert"
-            and req.checkpoint_before
-            and _empty_payload(payload)
-        ):
-            checkpoint_after = req.checkpoint_before
-        if checkpoint_after is None:
+            json.loads(raw_bytes)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise HTTPException(
-                status_code=502,
-                detail=f"response contains no usable watermark field {req.watermark_field!r}",
-            )
-    pagination_complete = _pagination_complete(payload)
+                status_code=502, detail=f"upstream response is not valid JSON: {exc}",
+            ) from exc
+        _write_atomically(dest, raw_bytes)
+        byte_size = len(raw_bytes)
+        payload_hash = hashlib.sha256(raw_bytes).hexdigest()
+    else:
+        if payload_temp_path is None:
+            raise RuntimeError("streamed payload was not written")
+        os.replace(payload_temp_path, dest)
+        byte_size, payload_hash = _file_metadata(dest)
+
     manifest = {
         "manifest_version": 1,
         "status": "extracted",
@@ -387,12 +498,11 @@ def extract(req: ExtractRequest) -> ExtractResponse:
         "fetched_at": fetched_at,
         "http_status": http_status,
         "content_type": content_type,
-        "byte_size": len(raw_bytes),
-        "sha256": hashlib.sha256(raw_bytes).hexdigest(),
+        "byte_size": byte_size,
+        "sha256": payload_hash,
         "payload_filename": filename,
     }
 
-    _write_atomically(dest, raw_bytes)
     _write_atomically(
         manifest_dest,
         json.dumps(manifest, ensure_ascii=True, indent=2).encode("utf-8") + b"\n",
@@ -420,3 +530,13 @@ def _write_atomically(destination: Path, content: bytes) -> None:
     except Exception:
         temporary_path.unlink(missing_ok=True)
         raise
+
+
+def _file_metadata(path: Path) -> tuple[int, str]:
+    digest = hashlib.sha256()
+    byte_size = 0
+    with path.open("rb") as payload_file:
+        while chunk := payload_file.read(1024 * 1024):
+            digest.update(chunk)
+            byte_size += len(chunk)
+    return byte_size, digest.hexdigest()
